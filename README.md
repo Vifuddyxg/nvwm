@@ -40,7 +40,7 @@ mkdir -p ~/.config/nvwm
 cp config.conf ~/.config/nvwm/config.conf
 ```
 
-If you also want compositor effects:
+If you also want compositor effects, add them manually:
 
 ```bash
 mkdir -p ~/.config/nvwm
@@ -52,6 +52,10 @@ Then enable picom from `~/.config/nvwm/config.conf`:
 ```conf
 autostart = picom --config ~/.config/nvwm/picom.conf
 ```
+
+`picom` support is optional and experimental.
+It is not required for NVWM and is not part of the default setup.
+Depending on your hardware, driver, and `picom` build, blur or animations may behave inconsistently.
 
 If you want the animation fork instead of upstream `picom`, install your preferred fork first and point the autostart line at that binary.
 
@@ -77,6 +81,7 @@ exec nvwm
 ```
 
 The minimal form may work on some systems, but the `dbus-run-session` variant is the safer default if you want audio/session services to behave normally.
+
 
 ## Greeter / XSession Example
 
@@ -104,8 +109,7 @@ export XDG_SESSION_DESKTOP=nvwm
 export XDG_SESSION_TYPE=x11
 
 exec dbus-run-session sh -lc '
-  pipewire &
-  wireplumber &
+  /usr/local/bin/ensure-audio-session
   exec nvwm
 '
 ```
@@ -177,6 +181,8 @@ autostart = picom --config ~/.config/nvwm/picom.conf
 
 Use `~/.config/nvwm/picom.conf` to customize blur, transparency, rounded corners, shadows, and fade speed.
 
+This support is optional and experimental. Add it manually only if you want compositor effects.
+
 Recommended package examples:
 
 - Arch Linux / Artix Linux: `sudo pacman -S picom`
@@ -187,7 +193,7 @@ Recommended package examples:
 - openSUSE: `sudo zypper install picom`
 - Alpine: `sudo apk add picom`
 
-`nvwm` works without `picom`. The compositor is optional.
+`nvwm` works without `picom`. The compositor is optional and not part of the default setup.
 
 ## Bar
 

@@ -9,6 +9,7 @@ NVWM uses a modal workflow:
 - `COMMAND` for vim-style commands such as `:q!`
 
 Windows are managed in a tiling tree. New windows are attached near the focused one. Floating windows stay above tiled ones and can be moved or resized with `Super+mouse`. Multi-monitor setups are handled through Xinerama.
+
 ## Dependencies
 
 - `libX11`
@@ -28,6 +29,7 @@ Examples:
 
 ## Full Install Example
 
+Minimal install:
 
 ```bash
 git clone https://github.com/Vifuddyxg/nvwm
@@ -53,15 +55,34 @@ autostart = picom --config ~/.config/nvwm/picom.conf
 
 If you want the animation fork instead of upstream `picom`, install your preferred fork first and point the autostart line at that binary.
 
-Add to `~/.xinitrc`:
+Minimal `~/.xinitrc`:
 
 ```sh
 exec nvwm
 ```
 
+Recommended `~/.xinitrc` for a full session:
+
+```sh
+exec dbus-run-session sh -lc '
+export XDG_CURRENT_DESKTOP=nvwm
+export XDG_SESSION_DESKTOP=nvwm
+export DESKTOP_SESSION=nvwm
+export XCURSOR_THEME=Adwaita
+export XCURSOR_SIZE=24
+pipewire &
+wireplumber &
+exec nvwm
+'
+```
+
+The minimal form may work on some systems, but the `dbus-run-session` variant is the safer default if you want audio/session services to behave normally.
+
 ## Greeter / XSession Example
 
 If you want to add NVWM to your greeter, one simple setup looks like this:
+
+Use a session wrapper script. Do not point the greeter directly at `nvwm`, or you may end up with a broken login session.
 
 `/usr/share/xsessions/nvwm.desktop`
 
@@ -76,14 +97,15 @@ DesktopNames=nvwm
 
 `/usr/local/bin/nvwm-session`
 
-```
+```sh
 #!/bin/sh
 export XDG_CURRENT_DESKTOP=nvwm
 export XDG_SESSION_DESKTOP=nvwm
 export XDG_SESSION_TYPE=x11
 
 exec dbus-run-session sh -lc '
-  /usr/local/bin/ensure-audio-session
+  pipewire &
+  wireplumber &
   exec nvwm
 '
 ```

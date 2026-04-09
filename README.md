@@ -9,10 +9,25 @@ NVWM uses a modal workflow:
 - `COMMAND` for vim-style commands such as `:q!`
 
 Windows are managed in a tiling tree. New windows are attached near the focused one. Floating windows stay above tiled ones and can be moved or resized with `Super+mouse`. Multi-monitor setups are handled through Xinerama.
+## Dependencies
+
+- `libX11`
+- `libXinerama`
+- C99 compiler
+
+Examples:
+
+- Arch Linux: `sudo pacman -S libx11 libxinerama`
+- Artix Linux: `sudo pacman -S libx11 libxinerama`
+- Void Linux: `sudo xbps-install libX11-devel libxinerama-devel`
+- Gentoo: `emerge x11-libs/libX11 x11-libs/libXinerama`
+- Debian / Ubuntu: `sudo apt install libx11-dev libxinerama-dev build-essential`
+- Fedora: `sudo dnf install libX11-devel libXinerama-devel gcc make`
+- openSUSE: `sudo zypper install libX11-devel libXinerama-devel gcc make`
+- Alpine: `sudo apk add libx11-dev libxinerama-dev build-base`
 
 ## Full Install Example
 
-Minimal install:
 
 ```bash
 git clone https://github.com/Vifuddyxg/nvwm
@@ -42,32 +57,6 @@ Add to `~/.xinitrc`:
 
 ```sh
 exec nvwm
-```
-
-## Dependencies
-
-- `libX11`
-- `libXinerama`
-- C99 compiler
-
-Examples:
-
-- Arch Linux: `sudo pacman -S libx11 libxinerama`
-- Artix Linux: `sudo pacman -S libx11 libxinerama`
-- Void Linux: `sudo xbps-install libX11-devel libxinerama-devel`
-- Gentoo: `emerge x11-libs/libX11 x11-libs/libXinerama`
-- Debian / Ubuntu: `sudo apt install libx11-dev libxinerama-dev build-essential`
-- Fedora: `sudo dnf install libX11-devel libXinerama-devel gcc make`
-- openSUSE: `sudo zypper install libX11-devel libXinerama-devel gcc make`
-- Alpine: `sudo apk add libx11-dev libxinerama-dev build-base`
-
-## Build
-
-```bash
-git clone https://github.com/Vifuddyxg/nvwm/
-cd nvwm
-make
-sudo make install
 ```
 
 ## Greeter / XSession Example

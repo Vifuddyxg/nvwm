@@ -55,14 +55,12 @@ If you want transparency, blur, shadows, or animations, install a `picom` build 
 
 - No compositor: lightest setup, no transparency, no blur, no animations.
 - Plain `picom`: transparency, blur, rounded corners, shadows, fades, but no extra animation fork requirements.
-- `pijulius/picom`: lighter and cleaner animation setup for users who want subtle animations.
 - `FT-Labs-picom`: more advanced animation-focused setup for users who want stronger animation effects.
 - Custom fork: you can use your own preferred `picom` fork as long as you point `autostart` at the correct binary.
 
 Project links:
 
 - Plain `picom`: https://github.com/yshui/picom
-- `pijulius/picom`: https://github.com/pijulius/picom
 - `FT-Labs-picom`: https://github.com/HcGys/FT-Labs-picom
 
 Important:
@@ -71,9 +69,6 @@ Important:
 - Do not assume `/usr/local/bin/picom` exists on every system.
 - If your distro package provides standard `picom`, the safest default is:
 
-```conf
-autostart = picom --config ~/.config/nvwm/picom.conf
-```
 
 ### Option 1: No `picom`
 
@@ -105,54 +100,41 @@ autostart = picom --config ~/.config/nvwm/picom.conf
 If you use plain `picom`, keep the config focused on blur, transparency, shadows, rounded corners, and fades.
 If the compositor fails to start, remove unsupported `animation-*` keys.
 
-### Option 3: `pijulius/picom`
-
-Use this if you want simpler, lighter, and cleaner animations.
-
-GitHub:
-
-- https://github.com/pijulius/picom
-
 ### Build dependencies for `picom` forks
 
 If you want to try a custom `picom` fork, this is the point where you switch from "install a package from the distro" to "build a compositor yourself".
-That is useful if you want lighter custom animations, more advanced animation behavior, or a fork with features that the standard distro package does not provide.
+That is useful if you want more advanced animation behavior or a fork with features that the standard distro package does not provide.
 
 Custom forks usually need the normal build toolchain, plus X11, XCB, config, event-loop, and rendering development libraries.
 If you only want plain `picom` from your distro for blur, transparency, shadows, and fades, skip this section entirely.
 
-If you want to build a custom `picom` fork such as `pijulius/picom` or `FT-Labs-picom`, install the build dependencies first:
+If you want to build a custom `picom` fork such as `FT-Labs-picom`, install the build dependencies first:
 
 - Arch Linux / Artix Linux:
 
 ```bash
-sudo pacman -S --needed base-devel git meson ninja pkgconf libx11 libxext libxcb xcb-util xcb-util-image xcb-util-renderutil libconfig libev pcre2 pixman dbus
+sudo pacman -S --needed base-devel git meson ninja pkgconf libx11 libxext libxcb xcb-util xcb-util-image xcb-util-renderutil libconfig libev pcre2 pixman dbus uthash
 ```
 
 - Debian / Ubuntu:
 
 ```bash
-sudo apt install git meson ninja-build pkg-config libconfig-dev libdbus-1-dev libev-dev libpcre2-dev libpixman-1-dev libx11-xcb-dev libxcb1-dev libxcb-composite0-dev libxcb-damage0-dev libxcb-image0-dev libxcb-present-dev libxcb-randr0-dev libxcb-render0-dev libxcb-render-util0-dev libxcb-shape0-dev libxcb-util-dev libxcb-xfixes0-dev libxext-dev
+sudo apt install git meson ninja-build pkg-config uthash-dev libconfig-dev libdbus-1-dev libev-dev libpcre2-dev libpixman-1-dev libx11-xcb-dev libxcb1-dev libxcb-composite0-dev libxcb-damage0-dev libxcb-image0-dev libxcb-present-dev libxcb-randr0-dev libxcb-render0-dev libxcb-render-util0-dev libxcb-shape0-dev libxcb-util-dev libxcb-xfixes0-dev libxext-dev
+```
+
+- Gentoo:
+
+```bash
+emerge dev-libs/uthash dev-util/meson dev-util/ninja dev-util/pkgconf x11-libs/libX11 x11-libs/libXext x11-libs/libxcb x11-libs/xcb-util x11-libs/xcb-util-image x11-libs/xcb-util-renderutil dev-libs/libconfig dev-libs/libev dev-libs/libpcre2 x11-libs/pixman sys-apps/dbus
 ```
 
 - Fedora:
 
 ```bash
-sudo dnf install gcc git meson ninja-build pkgconf-pkg-config libconfig-devel dbus-devel libev-devel pcre2-devel pixman-devel libX11-devel libX11-xcb libXext-devel libxcb-devel xcb-util-image-devel xcb-util-renderutil-devel
+sudo dnf install gcc git meson ninja-build pkgconf-pkg-config uthash-devel libconfig-devel dbus-devel libev-devel pcre2-devel pixman-devel libX11-devel libX11-xcb libXext-devel libxcb-devel xcb-util-image-devel xcb-util-renderutil-devel
 ```
 
-One simple local install example:
-
-```bash
-mkdir -p ~/src ~/opt
-git clone https://github.com/pijulius/picom ~/src/picom-pijulius
-cd ~/src/picom-pijulius
-meson setup --buildtype=release build --prefix="$HOME/opt/picom-pijulius"
-ninja -C build
-ninja -C build install
-```
-
-### Option 4: `FT-Labs-picom`
+### Option 3: `FT-Labs-picom`
 
 Use this if you want more advanced animation behavior and a more animation-heavy compositor setup.
 
@@ -171,12 +153,15 @@ ninja -C build
 ninja -C build install
 ```
 
-### Option 5: Your own fork
+This fork installs launcher symlinks such as `~/opt/picom-ftlabs/bin/compton` and `~/opt/picom-ftlabs/bin/compton-trans`.
+Use the `compton` launcher from that prefix in your NVWM autostart line.
+
+### Option 4: Your own fork
 
 If you want to test a custom build separately before making it your default compositor, install it to a separate prefix and point `autostart` at that exact binary:
 
 ```conf
-autostart = /home/your-user/opt/picom-custom/bin/picom --config ~/.config/nvwm/picom.conf
+autostart = ~/opt/picom-custom/bin/compton --config ~/.config/nvwm/picom.conf
 ```
 
 This makes it easy to compare multiple `picom` builds without replacing the system package or overwriting another fork you already use.
@@ -186,7 +171,11 @@ This makes it easy to compare multiple `picom` builds without replacing the syst
 Once you have installed the `picom` build you want, copy the sample config:
 
 ```bash
+<<<<<<< HEAD
 cd nvwm
+=======
+cd ~/nvwm
+>>>>>>> 608d015 (Fix window removal and update picom setup docs)
 mkdir -p ~/.config/nvwm
 cp picom.conf ~/.config/nvwm/picom.conf
 ```
@@ -199,22 +188,16 @@ Plain `picom`:
 autostart = picom --config ~/.config/nvwm/picom.conf
 ```
 
-`pijulius/picom`:
-
-```conf
-autostart = /home/your-user/opt/picom-pijulius/bin/picom --config ~/.config/nvwm/picom.conf
-```
-
 `FT-Labs-picom`:
 
 ```conf
-autostart = /home/your-user/opt/picom-ftlabs/bin/picom --config ~/.config/nvwm/picom.conf
+autostart = ~/opt/picom-ftlabs/bin/compton --config ~/.config/nvwm/picom.conf
 ```
 
 Your own fork:
 
 ```conf
-autostart = /home/your-user/opt/picom-custom/bin/picom --config ~/.config/nvwm/picom.conf
+autostart = ~/opt/picom-custom/bin/compton --config ~/.config/nvwm/picom.conf
 ```
 
 Minimal `~/.xinitrc`:

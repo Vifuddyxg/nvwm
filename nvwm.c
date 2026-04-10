@@ -172,6 +172,7 @@ static void update_supported_atoms(void);
 static void setup_wm_check(void);
 static void reloadwm(void);
 static void collect_leaves(Node *n, Node **list, int *count, int maxcount);
+static void free_tree(Node *n);
 static unsigned long hcol(const char *s) {
     return strtoul(*s == '#' ? s + 1 : s, NULL, 16);
 }
@@ -915,6 +916,15 @@ static void showtree(Node *n) {
     }
     showtree(n->a);
     showtree(n->b);
+}
+
+static void free_tree(Node *n) {
+    if (!n) return;
+    if (!n->leaf) {
+        free_tree(n->a);
+        free_tree(n->b);
+    }
+    free(n);
 }
 
 static void initatoms(void) {
@@ -2305,6 +2315,24 @@ int main(void) {
     }
 
     if (keyboard_grabbed) XUngrabKeyboard(dpy, CurrentTime);
+    for (int i = 0; i < nmons; i++) {
+        for (int ws = 0; ws < MAXWS; ws++) {
+            free_tree(mons[i].tree[ws]);
+            mons[i].tree[ws] = NULL;
+            mons[i].focused[ws] = NULL;
+        }
+        if (mons[i].barwin) {
+            XDestroyWindow(dpy, mons[i].barwin);
+            mons[i].barwin = 0;
+        }
+    }
+    if (wmcheckwin) {
+        XDestroyWindow(dpy, wmcheckwin);
+        wmcheckwin = 0;
+    }
+    if (normalcursor) XFreeCursor(dpy, normalcursor);
+    if (movecursor) XFreeCursor(dpy, movecursor);
+    if (resizecursor) XFreeCursor(dpy, resizecursor);
     XCloseDisplay(dpy);
     return 0;
 }

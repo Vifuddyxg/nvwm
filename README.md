@@ -18,8 +18,8 @@ Windows are managed in a tiling tree. New windows are attached near the focused 
 
 Examples:
 
-- Arch Linux: `sudo pacman -S libx11 libxinerama`
-- Artix Linux: `sudo pacman -S libx11 libxinerama`
+- Arch Linux: `sudo pacman -S libx11 libxinerama make`
+- Artix Linux: `sudo pacman -S libx11 libxinerama make`
 - Void Linux: `sudo xbps-install libX11-devel libxinerama-devel`
 - Gentoo: `emerge x11-libs/libX11 x11-libs/libXinerama`
 - Debian / Ubuntu: `sudo apt install libx11-dev libxinerama-dev build-essential`
@@ -171,11 +171,7 @@ This makes it easy to compare multiple `picom` builds without replacing the syst
 Once you have installed the `picom` build you want, copy the sample config:
 
 ```bash
-<<<<<<< HEAD
-cd nvwm
-=======
 cd ~/nvwm
->>>>>>> 608d015 (Fix window removal and update picom setup docs)
 mkdir -p ~/.config/nvwm
 cp picom.conf ~/.config/nvwm/picom.conf
 ```

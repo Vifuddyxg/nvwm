@@ -1106,14 +1106,14 @@ static void detach_from_ws(int mi, int ws, Node *n) {
 static void detach(int mi, Node *n) { detach_from_ws(mi, curws, n); }
 
 static void removewin(Window w) {
-    int mi = monforwin(w);
-    Node *n = findleaf(mon_tree(mi), w);
+    int mi = 0, ws = 0;
+    Node *n = findleaf_any(w, &mi, &ws);
     if (!n) return;
     if (drag_node == n) {
         drag_node = NULL;
         drag_mode = 0;
     }
-    detach(mi, n);
+    detach_from_ws(mi, ws, n);
     free(n);
     update_active_window();
 }

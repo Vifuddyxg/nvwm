@@ -40,24 +40,181 @@ mkdir -p ~/.config/nvwm
 cp config.conf ~/.config/nvwm/config.conf
 ```
 
-If you also want compositor effects, add them manually:
+If you also want transparency, blur, shadows, or animations, install a compositor such as `picom`.
+
+`picom` support is optional and experimental.
+It is not required for NVWM and is not part of the default setup.
+Depending on your hardware, driver, GPU, and `picom` build, blur or animations may behave differently.
+
+If you want the lightest NVWM setup, do not install `picom` at all.
+NVWM works fine without a compositor.
+
+### Choosing a `picom` build
+
+If you want transparency, blur, shadows, or animations, install a `picom` build that matches the effect level you want:
+
+- No compositor: lightest setup, no transparency, no blur, no animations.
+- Plain `picom`: transparency, blur, rounded corners, shadows, fades, but no extra animation fork requirements.
+- `pijulius/picom`: lighter and cleaner animation setup for users who want subtle animations.
+- `FT-Labs-picom`: more advanced animation-focused setup for users who want stronger animation effects.
+- Custom fork: you can use your own preferred `picom` fork as long as you point `autostart` at the correct binary.
+
+Project links:
+
+- Plain `picom`: https://github.com/yshui/picom
+- `pijulius/picom`: https://github.com/pijulius/picom
+- `FT-Labs-picom`: https://github.com/HcGys/FT-Labs-picom
+
+Important:
+
+- Different `picom` builds do not support the same flags or the same `animation-*` config keys.
+- Do not assume `/usr/local/bin/picom` exists on every system.
+- If your distro package provides standard `picom`, the safest default is:
+
+```conf
+autostart = picom --config ~/.config/nvwm/picom.conf
+```
+
+### Option 1: No `picom`
+
+Use this if you want the lightest NVWM setup:
+
+- Do not copy `picom.conf`
+- Do not add any `autostart = picom ...` line
+
+### Option 2: Plain `picom`
+
+Use this if you want transparency, blur, shadows, and rounded corners, without custom animation forks.
+
+Install:
+
+- Arch Linux / Artix Linux: `sudo pacman -S picom`
+- Void Linux: `sudo xbps-install -S picom`
+- Gentoo: `emerge x11-misc/picom`
+- Debian / Ubuntu: `sudo apt install picom`
+- Fedora: `sudo dnf install picom`
+- openSUSE: `sudo zypper install picom`
+- Alpine: `sudo apk add picom`
+
+Autostart:
+
+```conf
+autostart = picom --config ~/.config/nvwm/picom.conf
+```
+
+If you use plain `picom`, keep the config focused on blur, transparency, shadows, rounded corners, and fades.
+If the compositor fails to start, remove unsupported `animation-*` keys.
+
+### Option 3: `pijulius/picom`
+
+Use this if you want simpler, lighter, and cleaner animations.
+
+GitHub:
+
+- https://github.com/pijulius/picom
+
+### Build dependencies for `picom` forks
+
+If you want to try a custom `picom` fork, this is the point where you switch from "install a package from the distro" to "build a compositor yourself".
+That is useful if you want lighter custom animations, more advanced animation behavior, or a fork with features that the standard distro package does not provide.
+
+Custom forks usually need the normal build toolchain, plus X11, XCB, config, event-loop, and rendering development libraries.
+If you only want plain `picom` from your distro for blur, transparency, shadows, and fades, skip this section entirely.
+
+If you want to build a custom `picom` fork such as `pijulius/picom` or `FT-Labs-picom`, install the build dependencies first:
+
+- Arch Linux / Artix Linux:
+
+```bash
+sudo pacman -S --needed base-devel git meson ninja pkgconf libx11 libxext libxcb xcb-util xcb-util-image xcb-util-renderutil libconfig libev pcre2 pixman dbus
+```
+
+- Debian / Ubuntu:
+
+```bash
+sudo apt install git meson ninja-build pkg-config libconfig-dev libdbus-1-dev libev-dev libpcre2-dev libpixman-1-dev libx11-xcb-dev libxcb1-dev libxcb-composite0-dev libxcb-damage0-dev libxcb-image0-dev libxcb-present-dev libxcb-randr0-dev libxcb-render0-dev libxcb-render-util0-dev libxcb-shape0-dev libxcb-util-dev libxcb-xfixes0-dev libxext-dev
+```
+
+- Fedora:
+
+```bash
+sudo dnf install gcc git meson ninja-build pkgconf-pkg-config libconfig-devel dbus-devel libev-devel pcre2-devel pixman-devel libX11-devel libX11-xcb libXext-devel libxcb-devel xcb-util-image-devel xcb-util-renderutil-devel
+```
+
+One simple local install example:
+
+```bash
+mkdir -p ~/src ~/opt
+git clone https://github.com/pijulius/picom ~/src/picom-pijulius
+cd ~/src/picom-pijulius
+meson setup --buildtype=release build --prefix="$HOME/opt/picom-pijulius"
+ninja -C build
+ninja -C build install
+```
+
+### Option 4: `FT-Labs-picom`
+
+Use this if you want more advanced animation behavior and a more animation-heavy compositor setup.
+
+GitHub:
+
+- https://github.com/HcGys/FT-Labs-picom
+
+One simple local install example:
+
+```bash
+mkdir -p ~/src ~/opt
+git clone https://github.com/HcGys/FT-Labs-picom ~/src/FT-Labs-picom
+cd ~/src/FT-Labs-picom
+meson setup --buildtype=release build --prefix="$HOME/opt/picom-ftlabs"
+ninja -C build
+ninja -C build install
+```
+
+### Option 5: Your own fork
+
+If you want to test a custom build separately before making it your default compositor, install it to a separate prefix and point `autostart` at that exact binary:
+
+```conf
+autostart = /home/your-user/opt/picom-custom/bin/picom --config ~/.config/nvwm/picom.conf
+```
+
+This makes it easy to compare multiple `picom` builds without replacing the system package or overwriting another fork you already use.
+
+### After installing your chosen `picom`
+
+Once you have installed the `picom` build you want, copy the sample config:
 
 ```bash
 mkdir -p ~/.config/nvwm
 cp picom.conf ~/.config/nvwm/picom.conf
 ```
 
-Then enable picom from `~/.config/nvwm/config.conf`:
+Then enable it in `~/.config/nvwm/config.conf`.
+
+Plain `picom`:
 
 ```conf
 autostart = picom --config ~/.config/nvwm/picom.conf
 ```
 
-`picom` support is optional and experimental.
-It is not required for NVWM and is not part of the default setup.
-Depending on your hardware, driver, and `picom` build, blur or animations may behave inconsistently.
+`pijulius/picom`:
 
-If you want the animation fork instead of upstream `picom`, install your preferred fork first and point the autostart line at that binary.
+```conf
+autostart = /home/your-user/opt/picom-pijulius/bin/picom --config ~/.config/nvwm/picom.conf
+```
+
+`FT-Labs-picom`:
+
+```conf
+autostart = /home/your-user/opt/picom-ftlabs/bin/picom --config ~/.config/nvwm/picom.conf
+```
+
+Your own fork:
+
+```conf
+autostart = /home/your-user/opt/picom-custom/bin/picom --config ~/.config/nvwm/picom.conf
+```
 
 Minimal `~/.xinitrc`:
 
@@ -164,34 +321,10 @@ Supported modifiers:
 
 ## Compositor
 
-If you want transparency, blur, shadows, rounded corners, and smoother fades, use a compositor instead of building those effects into the window manager.
+If you want transparency, blur, shadows, rounded corners, fades, or animations, use a compositor instead of building those effects into the window manager.
 
-A sample `picom.conf` is included in the repo. One simple setup is:
-
-```
-mkdir -p ~/.config/nvwm
-cp picom.conf ~/.config/nvwm/picom.conf
-```
-
-Then add this to `config.conf`:
-
-```conf
-autostart = picom --config ~/.config/nvwm/picom.conf
-```
-
-Use `~/.config/nvwm/picom.conf` to customize blur, transparency, rounded corners, shadows, and fade speed.
-
-This support is optional and experimental. Add it manually only if you want compositor effects.
-
-Recommended package examples:
-
-- Arch Linux / Artix Linux: `sudo pacman -S picom`
-- Void Linux: `sudo xbps-install -S picom`
-- Gentoo: `emerge x11-misc/picom`
-- Debian / Ubuntu: `sudo apt install picom`
-- Fedora: `sudo dnf install picom`
-- openSUSE: `sudo zypper install picom`
-- Alpine: `sudo apk add picom`
+A sample `picom.conf` is included in the repo and can be copied after you install the `picom` build you want.
+Use the installation and activation steps from the `Choosing a picom build` section above, then adjust `~/.config/nvwm/picom.conf` for blur, transparency, rounded corners, shadows, fades, and any fork-specific animation settings you want.
 
 `nvwm` works without `picom`. The compositor is optional and not part of the default setup.
 

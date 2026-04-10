@@ -10,6 +10,7 @@
 #include <X11/extensions/Xinerama.h>
 #include <signal.h>
 #include <limits.h>
+#include <sys/select.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -173,6 +174,7 @@ static void setup_wm_check(void);
 static void reloadwm(void);
 static void collect_leaves(Node *n, Node **list, int *count, int maxcount);
 static void free_tree(Node *n);
+static void wait_for_x_event_or_clock_tick(void);
 static unsigned long hcol(const char *s) {
     return strtoul(*s == '#' ? s + 1 : s, NULL, 16);
 }
@@ -854,6 +856,30 @@ static void drawbars_if_clock_changed(void) {
     localtime_r(&now, &tm_now);
     if (tm_now.tm_sec != last_clock_second) {
         drawbars();
+    }
+}
+
+static void wait_for_x_event_or_clock_tick(void) {
+    int xfd = ConnectionNumber(dpy);
+    fd_set readfds;
+
+    XFlush(dpy);
+    FD_ZERO(&readfds);
+    FD_SET(xfd, &readfds);
+
+    if (bar_uses_item("clock") || bar_uses_item("battery")) {
+        struct timespec now;
+        struct timeval tv;
+        long usec;
+
+        clock_gettime(CLOCK_REALTIME, &now);
+        usec = 1000000L - now.tv_nsec / 1000L;
+        if (usec <= 0) usec = 1000L;
+        tv.tv_sec = usec / 1000000L;
+        tv.tv_usec = usec % 1000000L;
+        select(xfd + 1, &readfds, NULL, NULL, &tv);
+    } else {
+        select(xfd + 1, &readfds, NULL, NULL, NULL);
     }
 }
 
@@ -1591,7 +1617,6 @@ static void reloadwm(void) {
     retile();
     if (mon_focused(curmon)) setfocus(curmon, mon_focused(curmon), 0);
     else update_active_window();
-    drawbars();
 }
 
 static void set_net_wm_state(Window win, int fullscreen) {
@@ -1778,15 +1803,27 @@ static int apply_wm_action(const char *action) {
         return 1;
     }
     if (!strcmp(action, "wm:toggle_float")) {
-        if (!mon_focused(curmon)) return 1;
-        mon_focused(curmon)->floating ^= 1;
-        if (mon_focused(curmon)->floating) {
-            int fw = m->ww / 2;
-            int fh = m->wh / 2;
-            int fx = m->wx + (m->ww - fw) / 2;
-            int fy = m->wy + (m->wh - fh) / 2;
-            XMoveResizeWindow(dpy, mon_focused(curmon)->win, fx, fy, fw - 2 * bw, fh - 2 * bw);
-            XRaiseWindow(dpy, mon_focused(curmon)->win);
+        Node *f = mon_focused(curmon);
+        if (!f) return 1;
+        f->floating ^= 1;
+        if (f->floating) {
+            Window dw;
+            int wx, wy;
+            unsigned ww, wh, bw_req, depth;
+            if (XGetGeometry(dpy, f->win, &dw, &wx, &wy, &ww, &wh, &bw_req, &depth)) {
+                int fw = (int)ww;
+                int fh = (int)wh;
+                if (fw < 50) fw = m->ww / 2;
+                if (fh < 50) fh = m->wh / 2;
+                XMoveResizeWindow(dpy, f->win, wx, wy, fw, fh);
+            } else {
+                int fw = m->ww / 2;
+                int fh = m->wh / 2;
+                int fx = m->wx + (m->ww - fw) / 2;
+                int fy = m->wy + (m->wh - fh) / 2;
+                XMoveResizeWindow(dpy, f->win, fx, fy, fw - 2 * bw, fh - 2 * bw);
+            }
+            XRaiseWindow(dpy, f->win);
         }
         retile();
         return 1;
@@ -1960,7 +1997,6 @@ static void setupbars(void) {
             XMoveResizeWindow(dpy, m->barwin, m->x, m->y + m->h - barh, m->w, barh);
         }
         XSetWindowBackground(dpy, m->barwin, barbg);
-        XClearWindow(dpy, m->barwin);
         XChangeProperty(dpy, m->barwin, atom_net_wm_window_type, XA_ATOM, 32,
             PropModeReplace, (unsigned char *)dock_type, 1);
         XStoreName(dpy, m->barwin, "nvwm-bar");
@@ -2036,6 +2072,7 @@ int main(void) {
             XNextEvent(dpy, &ev);
             switch (ev.type) {
         case Expose:
+            if (ev.xexpose.count != 0) break;
             for (int i = 0; i < nmons; i++) {
                 if (ev.xexpose.window == mons[i].barwin) {
                     drawbar(i);
@@ -2053,6 +2090,13 @@ int main(void) {
                 unsigned msk;
                 Node *n;
                 int targetws = curws;
+                int existing_mi = 0, existing_ws = 0;
+                Node *existing = findleaf_any(ev.xmaprequest.window, &existing_mi, &existing_ws);
+                if (existing) {
+                    retile();
+                    if (existing_ws == curws) setfocus(existing_mi, existing, 1);
+                    break;
+                }
                 XQueryPointer(dpy, root, &dw, &dw, &rx, &ry, &wx, &wy, &msk);
                 int mi = monforpt(rx, ry);
                 n = mkleaf(ev.xmaprequest.window);
@@ -2119,6 +2163,12 @@ int main(void) {
             break;
 
         case ConfigureRequest: {
+            int mi = 0, ws = 0;
+            Node *n = findleaf_any(ev.xconfigurerequest.window, &mi, &ws);
+            if (n && ws == curws && !n->floating && !n->fullscreen && !n->real_fullscreen) {
+                retile();
+                break;
+            }
             XWindowChanges wc = {
                 .x = ev.xconfigurerequest.x,
                 .y = ev.xconfigurerequest.y,
@@ -2308,10 +2358,8 @@ int main(void) {
             }
         }
         drawbars_if_clock_changed();
-        {
-            struct timespec ts = {0, 100000000L};
-            nanosleep(&ts, NULL);
-        }
+        if (!running) break;
+        if (!XPending(dpy)) wait_for_x_event_or_clock_tick();
     }
 
     if (keyboard_grabbed) XUngrabKeyboard(dpy, CurrentTime);

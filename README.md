@@ -186,6 +186,7 @@ This makes it easy to compare multiple `picom` builds without replacing the syst
 Once you have installed the `picom` build you want, copy the sample config:
 
 ```bash
+cd nvwm
 mkdir -p ~/.config/nvwm
 cp picom.conf ~/.config/nvwm/picom.conf
 ```

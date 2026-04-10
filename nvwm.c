@@ -630,7 +630,9 @@ static void tilenode(Node *n, int x, int y, int w, int h, Node *foc) {
     n->h = h;
     if (n->leaf) {
         drawborder(n, n == foc);
-        if (n->fullscreen || n->real_fullscreen) {
+        if (n->real_fullscreen) {
+            XMoveResizeWindow(dpy, n->win, x, y, w, h);
+        } else if (n->fullscreen) {
             XMoveResizeWindow(dpy, n->win, x, y, w - 2 * bw, h - 2 * bw);
         } else if (!n->floating) {
             int tw = w - 2 * gap - 2 * bw;
@@ -897,7 +899,7 @@ static void retile(void) {
             drawborder(fs, fs == mon_focused(i));
             if (fs->real_fullscreen) {
                 if (m->barwin) XUnmapWindow(dpy, m->barwin);
-                XMoveResizeWindow(dpy, fs->win, m->x, m->y, m->w - 2 * bw, m->h - 2 * bw);
+                XMoveResizeWindow(dpy, fs->win, m->x, m->y, m->w, m->h);
             } else {
                 if (m->barwin) XMapRaised(dpy, m->barwin);
                 XMoveResizeWindow(dpy, fs->win, m->wx, m->wy, m->ww - 2 * bw, m->wh - 2 * bw);

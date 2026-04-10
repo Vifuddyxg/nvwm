@@ -926,7 +926,7 @@ static void setfocus(int mi, Node *n, int warp) {
     curmon = mi;
     if (prev && prev != n) drawborder(prev, 0);
     if (mode == MODE_INSERT) XSetInputFocus(dpy, n->win, RevertToPointerRoot, CurrentTime);
-    XRaiseWindow(dpy, n->win);
+    if (n->floating || n->fullscreen || n->real_fullscreen) XRaiseWindow(dpy, n->win);
     drawborder(n, 1);
     raise_floating(mon_tree(mi));
     if (mons[mi].barwin) XRaiseWindow(dpy, mons[mi].barwin);
@@ -1800,6 +1800,23 @@ static int apply_wm_action(const char *action) {
     }
     if (!strcmp(action, "wm:move_to_workspace_next")) {
         move_focused_to_workspace_and_follow((curws + 1) % MAXWS);
+        return 1;
+    }
+    if (!strcmp(action, "wm:toggle_float_centered")) {
+        Node *f = mon_focused(curmon);
+        if (!f) return 1;
+        f->floating ^= 1;
+        if (f->floating) {
+            int fw = m->ww * 3 / 5;
+            int fh = m->wh * 3 / 5;
+            int fx = m->wx + (m->ww - fw) / 2;
+            int fy = m->wy + (m->wh - fh) / 2;
+            if (fw < 50) fw = 50;
+            if (fh < 50) fh = 50;
+            XMoveResizeWindow(dpy, f->win, fx, fy, fw - 2 * bw, fh - 2 * bw);
+            XRaiseWindow(dpy, f->win);
+        }
+        retile();
         return 1;
     }
     if (!strcmp(action, "wm:toggle_float")) {

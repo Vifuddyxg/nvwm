@@ -69,6 +69,10 @@ Important:
 - Do not assume `/usr/local/bin/picom` exists on every system.
 - If your distro package provides standard `picom`, the safest default is:
 
+```conf
+autostart = picom --config ~/.config/nvwm/picom.conf
+```
+
 
 ### Option 1: No `picom`
 

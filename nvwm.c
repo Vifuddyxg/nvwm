@@ -43,17 +43,17 @@ struct Node {
 typedef struct {
     unsigned int mod;
     KeyCode code;
-    char action[256];
+    char action[128];
 } ModBind;
 
 typedef struct {
     KeySym sym;
-    char action[256];
+    char action[128];
 } ModeBind;
 
 typedef struct {
     char name[64];
-    char action[256];
+    char action[128];
 } CmdBind;
 
 typedef struct {
@@ -1451,7 +1451,7 @@ static void add_autostart_cmd(const char *cmd) {
 static int parse_bind_config(const char *line) {
     char mode_name[64], keyexpr[128], action[256];
 
-    if (sscanf(line, "bind_%63[^ ] = %127[^=]= %255[^\n]", mode_name, keyexpr, action) != 3) return 0;
+    if (sscanf(line, "bind_%63[^ ] = %127[^=]= %127[^\n]", mode_name, keyexpr, action) != 3) return 0;
     rtrim(mode_name);
     rtrim(keyexpr);
     rtrim(action);
@@ -1480,7 +1480,7 @@ static int parse_bind_config(const char *line) {
 static int parse_command_config(const char *line) {
     char cmd_name[64], cmd_action[256];
 
-    if (sscanf(line, "command = %63[^=]= %255[^\n]", cmd_name, cmd_action) != 2) return 0;
+    if (sscanf(line, "command = %63[^=]= %127[^\n]", cmd_name, cmd_action) != 2) return 0;
     rtrim(cmd_name);
     rtrim(cmd_action);
     upsert_cmdbind(skip_command_prefix(cmd_name), cmd_action);

@@ -1,5 +1,5 @@
 CC      = cc
-CFLAGS  = -O2 -std=c99 -Wall -Wextra -pedantic
+CFLAGS  = -Os -std=c99 -Wall -Wextra -pedantic -flto
 LDFLAGS = -lX11 -lXinerama
 BIN     = nvwm
 SRC     = nvwm.c

@@ -16,6 +16,6 @@ uninstall:
 	rm -f /etc/nvwm/config.conf
 
 clean:
-	rm -f $(BIN) viwm
+	rm -f $(BIN)
 
 .PHONY: install uninstall clean

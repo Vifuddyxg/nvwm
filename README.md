@@ -266,13 +266,13 @@ If you use `greetd` with `tuigreet`, that is enough.
 
 ## Configuration
 
-NVWM uses a single active config file:
-
-- `~/.config/nvwm/config.conf`
-
-If that file does not exist, it falls back to:
+NVWM loads config files in this order:
 
 - `/etc/nvwm/config.conf`
+- `./config.conf`
+- `~/.config/nvwm/config.conf`
+
+Later files override earlier ones.
 
 No recompile needed for config changes.
 
@@ -455,7 +455,7 @@ Each monitor keeps its own independent layout tree.
 
 ## Notes
 
-- `config.conf` is the only active configuration file
+- config files are loaded from `/etc/nvwm/config.conf`, then `./config.conf`, then `~/.config/nvwm/config.conf`
 - after `sudo make install`, copy `config.conf` into `~/.config/nvwm/config.conf` if you want a per-user config
 - media and brightness keys are optional
 - `Super+f` uses the WM fullscreen mode, while applications can still request real fullscreen through EWMH

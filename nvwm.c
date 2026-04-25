@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 #define MOD          Mod4Mask
-#define MAXBINDS     48
+#define MAXBINDS     64
 #define MAXMODEBINDS 24
 #define MAXCMDS      16
 #define MAXRULES     32
@@ -939,6 +939,8 @@ static void warpfocus(Node *n) {
 
 static void setfocus(int mi, Node *n, int warp) {
     if (!n || !n->leaf) return;
+    Node *fs = find_fullscreen_leaf(mon_tree(mi));
+    if (fs && fs != n) { n = fs; warp = 0; }
     Node *prev = mon_focused(mi);
     mon_setfocused(mi, n);
     curmon = mi;
@@ -1621,8 +1623,9 @@ static void loadcfg(void) {
     }
 
     reset_config_defaults();
+    loadcfg_file("/etc/nvwm/config.conf");
+    loadcfg_file("./config.conf");
     if (homecfg[0]) loadcfg_file(homecfg);
-    else loadcfg_file("/etc/nvwm/config.conf");
 }
 
 static void run_autostart(void) {
@@ -2147,7 +2150,10 @@ int main(void) {
                 attach_to_ws(mi, targetws, n);
                 if (targetws != curws) unmap_managed(n);
                 retile();
-                if (targetws == curws) setfocus(mi, n, 1);
+                if (targetws == curws) {
+                    Node *fs = find_fullscreen_leaf(mon_tree(mi));
+                    setfocus(mi, fs ? fs : n, fs ? 0 : 1);
+                }
             }
             break;
 
@@ -2247,7 +2253,7 @@ int main(void) {
             }
             if (!n || (ev.xbutton.button != Button1 && ev.xbutton.button != Button3)) break;
 
-            if (!n->real_fullscreen && !n->floating) {
+            if (!n->real_fullscreen && !n->floating && ev.xbutton.button == Button1) {
                 int fx = n->x + gap;
                 int fy = n->y + gap;
                 int fw = n->w - 2 * gap;
@@ -2326,7 +2332,7 @@ int main(void) {
                     if (nx + drag_ww + 2 * bw > sw) nx = sw - drag_ww - 2 * bw;
                     if (ny + drag_wh + 2 * bw > sh) ny = sh - drag_wh - 2 * bw;
                     XMoveWindow(dpy, drag_node->win, nx, ny);
-                } else {
+                } else if (drag_node->floating) {
                     int nw = drag_ww + dx;
                     int nh = drag_wh + dy;
                     if (nw < 50) nw = 50;
@@ -2334,6 +2340,20 @@ int main(void) {
                     if (drag_wx + nw + 2 * bw > sw) nw = sw - drag_wx - 2 * bw;
                     if (drag_wy + nh + 2 * bw > sh) nh = sh - drag_wy - 2 * bw;
                     XResizeWindow(dpy, drag_node->win, nw, nh);
+                } else if (drag_node->par) {
+                    Node *p = drag_node->par;
+                    int sign = (p->a == drag_node) ? 1 : -1;
+                    float delta;
+                    if (p->horiz)
+                        delta = p->w > 0 ? (float)dx / p->w * sign : 0.0f;
+                    else
+                        delta = p->h > 0 ? (float)dy / p->h * sign : 0.0f;
+                    p->ratio += delta;
+                    if (p->ratio < 0.1f) p->ratio = 0.1f;
+                    if (p->ratio > 0.9f) p->ratio = 0.9f;
+                    retile();
+                    drag_ox = ev.xmotion.x_root;
+                    drag_oy = ev.xmotion.y_root;
                 }
             }
             break;

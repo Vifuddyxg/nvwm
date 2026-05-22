@@ -95,6 +95,7 @@ static char barfontname[128] = "9x15";
 static char barleftcfg[128] = "workspaces";
 static char barcentercfg[128] = "command";
 static char barrightcfg[128] = "clock";
+static int screen_off_minutes;
 static BarPosition barpos = BAR_TOP;
 static Display *dpy;
 static Window root;
@@ -143,6 +144,8 @@ static Atom atom_net_wm_desktop;
 static Atom atom_net_wm_state;
 static Atom atom_net_wm_state_fullscreen;
 static Atom atom_net_wm_name;
+static Atom atom_wm_protocols;
+static Atom atom_wm_delete_window;
 static char cached_title[256];
 static char cmdline[CMDLINE_MAX];
 static int cmdline_len;
@@ -178,6 +181,8 @@ static void reloadwm(void);
 static void collect_leaves(Node *n, Node **list, int *count, int maxcount);
 static void free_tree(Node *n);
 static void wait_for_x_event_or_clock_tick(void);
+static void apply_screen_off_config(void);
+static void close_window(Window win);
 static unsigned long hcol(const char *s) {
     return strtoul(*s == '#' ? s + 1 : s, NULL, 16);
 }
@@ -745,8 +750,8 @@ static int draw_workspace_section(Window win, int x, int y) {
         if (!workspace_has_windows(i) && i != curws) continue;
         snprintf(part, sizeof part, "%d", i + 1);
         if (i == curws) {
-            bg = cnorm;
-            fg = barfg;
+            bg = baraccentbg;
+            fg = baraccentfg;
         } else if (workspace_has_windows(i)) {
             fg = barfg;
         }
@@ -992,6 +997,8 @@ static void initatoms(void) {
     atom_net_wm_state = XInternAtom(dpy, "_NET_WM_STATE", False);
     atom_net_wm_state_fullscreen = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
     atom_net_wm_name = XInternAtom(dpy, "_NET_WM_NAME", False);
+    atom_wm_protocols = XInternAtom(dpy, "WM_PROTOCOLS", False);
+    atom_wm_delete_window = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
 }
 
 static void setup_wm_check(void) {
@@ -1299,6 +1306,39 @@ static void screenshot(void) {
     spawn(cmd);
 }
 
+static void close_window(Window win) {
+    Atom *protocols = NULL;
+    int nprotocols = 0;
+    int supports_delete = 0;
+
+    if (!win) return;
+
+    if (XGetWMProtocols(dpy, win, &protocols, &nprotocols)) {
+        for (int i = 0; i < nprotocols; i++) {
+            if (protocols[i] == atom_wm_delete_window) {
+                supports_delete = 1;
+                break;
+            }
+        }
+        if (protocols) XFree(protocols);
+    }
+
+    if (supports_delete) {
+        XEvent ev;
+        memset(&ev, 0, sizeof ev);
+        ev.xclient.type = ClientMessage;
+        ev.xclient.window = win;
+        ev.xclient.message_type = atom_wm_protocols;
+        ev.xclient.format = 32;
+        ev.xclient.data.l[0] = atom_wm_delete_window;
+        ev.xclient.data.l[1] = CurrentTime;
+        XSendEvent(dpy, win, False, NoEventMask, &ev);
+        return;
+    }
+
+    XDestroyWindow(dpy, win);
+}
+
 static void spawn(const char *cmd) {
     if (fork() == 0) {
         setsid();
@@ -1375,6 +1415,7 @@ static void reset_config_defaults(void) {
     copystr(barleftcfg, sizeof barleftcfg, "command,title,workspaces");
     copystr(barcentercfg, sizeof barcentercfg, "command");
     copystr(barrightcfg, sizeof barrightcfg, "clock");
+    screen_off_minutes = 0;
     barpos = BAR_TOP;
     nmodbinds = 0;
     nnormalbinds = 0;
@@ -1571,6 +1612,7 @@ static int apply_scalar_config(const char *k, const char *v) {
     else if (!strcmp(k, "bar_left")) copystr(barleftcfg, sizeof barleftcfg, v);
     else if (!strcmp(k, "bar_center")) copystr(barcentercfg, sizeof barcentercfg, v);
     else if (!strcmp(k, "bar_right")) copystr(barrightcfg, sizeof barrightcfg, v);
+    else if (!strcmp(k, "screen_off_minutes")) screen_off_minutes = clampi(atoi(v), 0, 1440);
     else if (!strcmp(k, "bar_position")) {
         if (!strcasecmp(v, "bottom")) barpos = BAR_BOTTOM;
         else barpos = BAR_TOP;
@@ -1632,9 +1674,24 @@ static void run_autostart(void) {
     for (int i = 0; i < nautostart; i++) spawn(autostart_cmds[i]);
 }
 
+static void apply_screen_off_config(void) {
+    char cmd[128];
+
+    if (screen_off_minutes <= 0) {
+        spawn("xset s off -dpms >/dev/null 2>&1");
+        return;
+    }
+
+    snprintf(cmd, sizeof cmd,
+        "xset s off +dpms dpms 0 0 %d >/dev/null 2>&1",
+        screen_off_minutes * 60);
+    spawn(cmd);
+}
+
 static void reloadwm(void) {
     XUngrabKey(dpy, AnyKey, AnyModifier, root);
     loadcfg();
+    apply_screen_off_config();
     updatenumlockmask();
     grab_mod_binds();
     setupbars();
@@ -1739,7 +1796,7 @@ static int apply_wm_action(const char *action) {
         return 1;
     }
     if (!strcmp(action, "wm:kill")) {
-        if (mon_focused(curmon)) XKillClient(dpy, mon_focused(curmon)->win);
+        if (mon_focused(curmon)) close_window(mon_focused(curmon)->win);
         return 1;
     }
     if (!strcmp(action, "wm:reload")) {
@@ -2096,6 +2153,7 @@ int main(void) {
     XSelectInput(dpy, root, SubstructureNotifyMask | SubstructureRedirectMask | KeyPressMask);
 
     loadcfg();
+    apply_screen_off_config();
     updatenumlockmask();
     grab_mod_binds();
     setupbars();

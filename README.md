@@ -15,17 +15,37 @@ Windows are managed in a tiling tree. New windows are attached near the focused 
 - `libX11`
 - `libXinerama`
 - C99 compiler
+- `make`
+- `git` if you clone the repository with `git clone`
 
 Examples:
 
-- Arch Linux: `sudo pacman -S libx11 libxinerama make`
-- Artix Linux: `sudo pacman -S libx11 libxinerama make`
-- Void Linux: `sudo xbps-install libX11-devel libxinerama-devel`
-- Gentoo: `emerge x11-libs/libX11 x11-libs/libXinerama`
-- Debian / Ubuntu: `sudo apt install libx11-dev libxinerama-dev build-essential`
-- Fedora: `sudo dnf install libX11-devel libXinerama-devel gcc make`
-- openSUSE: `sudo zypper install libX11-devel libXinerama-devel gcc make`
-- Alpine: `sudo apk add libx11-dev libxinerama-dev build-base`
+- Arch Linux: `sudo pacman -S git libx11 libxinerama make`
+- Artix Linux: `sudo pacman -S git libx11 libxinerama make`
+- Void Linux: `sudo xbps-install git gcc make libX11-devel libxinerama-devel`
+- Gentoo: `emerge dev-vcs/git x11-libs/libX11 x11-libs/libXinerama`
+- Debian / Ubuntu: `sudo apt install git libx11-dev libxinerama-dev build-essential`
+- Fedora: `sudo dnf install git libX11-devel libXinerama-devel gcc make`
+- openSUSE: `sudo zypper install git libX11-devel libXinerama-devel gcc make`
+- Alpine: `sudo apk add git libx11-dev libxinerama-dev build-base`
+- NixOS / nix-shell: `nix-shell -p git gcc gnumake xorg.libX11 xorg.libXinerama`
+- FreeBSD: `doas pkg install git libX11 libXinerama`
+- OpenBSD: install the `xbase` and `xshare` sets; use `doas pkg_add git` if you clone with Git
+
+Runtime tools used by the default config:
+
+- `alacritty` for `terminal = alacritty` and `Super+q`
+- `rofi` for the default `Super+Space` launcher
+- one screenshot tool: `maim`, `scrot`, or ImageMagick's `import`
+- optional media tools if you uncomment those keybinds: `pactl`, `playerctl`, and `brightnessctl`
+
+You can avoid these runtime tools by changing the matching commands in `~/.config/nvwm/config.conf`.
+
+Session tools:
+
+- an X11 server such as Xorg or XLibre
+- either `startx`/`xinit` or a display manager/greeter that can start X sessions
+- `dbus-run-session` if you use the recommended full-session examples below
 
 ## Full Install Example
 
@@ -39,6 +59,194 @@ sudo make install
 mkdir -p ~/.config/nvwm
 cp config.conf ~/.config/nvwm/config.conf
 ```
+
+### NixOS
+
+For a temporary build shell:
+
+```bash
+nix-shell -p git gcc gnumake xorg.libX11 xorg.libXinerama
+make
+make install PREFIX="$HOME/.local" SYSCONFDIR="$HOME/.config"
+```
+
+For a declarative NixOS setup, add the build/runtime tools you want to your system or user packages, then build NVWM from this repo:
+
+```nix
+environment.systemPackages = with pkgs; [
+  git
+  gcc
+  gnumake
+  dbus
+  xorg.libX11
+  xorg.libXinerama
+  xorg.xinit
+  xorg.xset
+  alacritty
+  rofi
+];
+```
+
+`sudo make install` writes to `/usr/local/bin` and `/etc/nvwm`.
+That is normal on many Unix systems, but on NixOS a per-user install such as `~/.local/bin/nvwm` is usually simpler unless you package NVWM as a derivation.
+
+### FreeBSD
+
+FreeBSD installs X11 headers and libraries under `/usr/local`, so pass those paths when building:
+
+```sh
+doas pkg install git libX11 libXinerama
+make \
+  CPPFLAGS="-I/usr/local/include" \
+  LDFLAGS="-L/usr/local/lib"
+doas make install
+mkdir -p ~/.config/nvwm
+cp config.conf ~/.config/nvwm/config.conf
+```
+
+You can change the install location with `PREFIX=/path` or stage a package with `DESTDIR=/path`.
+The Makefile does not require GNU `install -D`.
+
+Manual install is also straightforward:
+
+```sh
+doas mkdir -p /usr/local/bin /etc/nvwm
+doas install -m 755 nvwm /usr/local/bin/nvwm
+doas install -m 644 config.conf /etc/nvwm/config.conf
+```
+
+### OpenBSD
+
+OpenBSD keeps X11 under `/usr/X11R6`, so pass those paths when building:
+
+```sh
+make \
+  CPPFLAGS="-I/usr/X11R6/include" \
+  LDFLAGS="-L/usr/X11R6/lib"
+doas make install
+mkdir -p ~/.config/nvwm
+cp config.conf ~/.config/nvwm/config.conf
+```
+
+If your OpenBSD install does not include X, install the `xbase` and `xshare` sets first.
+The Makefile does not require GNU `install -D`; the manual install form shown in the FreeBSD section works too.
+
+### Portability Notes
+
+NVWM is an X11 window manager. It is intended to run inside an X session, not as a Wayland compositor.
+
+NVWM works with Xorg and XLibre, because XLibre is an X11 server forked from X.Org Server with a compatibility goal.
+NVWM uses normal Xlib/EWMH behavior and Xinerama for monitor geometry. If Xinerama is not active, NVWM falls back to one monitor using the root window size.
+
+The `battery` bar item currently reads Linux-style battery information from `/sys/class/power_supply`.
+On NixOS it works the same as other Linux distributions; on FreeBSD and OpenBSD it may stay empty unless that code is adapted for the platform.
+
+The optional `screen_off_minutes` setting uses `xset`.
+Install `xset` if you want that feature on a minimal system, or leave `screen_off_minutes = 0`.
+
+### Xserver Sessions: Xorg and XLibre
+
+NVWM runs inside a normal X11 session. You can use the traditional Xorg server or XLibre, an alternative X11 server implementation forked from X.Org Server.
+
+NVWM does not need a separate build for XLibre. Build NVWM against the normal X11 client libraries (`libX11` and `libXinerama`) and run it inside the XLibre session.
+
+If your distribution packages XLibre, prefer those packages. The XLibre project tracks package availability on its wiki:
+
+- https://github.com/X11Libre/xserver/wiki/Are-We-XLibre-Yet%3F
+
+Minimal `~/.xinitrc`:
+
+```sh
+exec nvwm
+```
+
+Recommended `~/.xinitrc` for a full session:
+
+```sh
+exec dbus-run-session sh -lc '
+export XDG_CURRENT_DESKTOP=nvwm
+export XDG_SESSION_DESKTOP=nvwm
+export DESKTOP_SESSION=nvwm
+export XCURSOR_THEME=Adwaita
+export XCURSOR_SIZE=24
+command -v pipewire >/dev/null 2>&1 && pipewire &
+command -v wireplumber >/dev/null 2>&1 && wireplumber &
+exec nvwm
+'
+```
+
+The minimal form may work on some systems, but the `dbus-run-session` variant is the safer default if you want audio/session services to behave normally.
+
+If you build XLibre from source into a separate prefix, test that server first, then start NVWM on it:
+
+```sh
+XSERVER="$HOME/opt/xlibre/bin/X"
+startx "$HOME/.local/bin/nvwm" -- "$XSERVER" :1
+```
+
+If your `startx` does not accept a server path directly, use `xinit`:
+
+```sh
+xinit "$HOME/.local/bin/nvwm" -- "$HOME/opt/xlibre/bin/X" :1
+```
+
+For the normal installed system server, keep the regular `~/.xinitrc`:
+
+```sh
+exec nvwm
+```
+
+Then run:
+
+```sh
+startx
+```
+
+#### Greeter / XSession
+
+If you want to add NVWM to your greeter, one simple setup looks like this.
+Use a session wrapper script. Do not point the greeter directly at `nvwm`, or you may end up with a broken login session.
+
+`/usr/share/xsessions/nvwm.desktop`
+
+```ini
+[Desktop Entry]
+Name=NVWM
+Comment=Neovim Window Manager
+Exec=/usr/local/bin/nvwm-session
+Type=XSession
+DesktopNames=nvwm
+```
+
+`/usr/local/bin/nvwm-session`
+
+```sh
+#!/bin/sh
+export XDG_CURRENT_DESKTOP=nvwm
+export XDG_SESSION_DESKTOP=nvwm
+export XDG_SESSION_TYPE=x11
+
+exec dbus-run-session sh -lc '
+  command -v pipewire >/dev/null 2>&1 && pipewire &
+  command -v wireplumber >/dev/null 2>&1 && wireplumber &
+  exec nvwm
+'
+```
+
+Make the session launcher executable:
+
+```sh
+sudo chmod +x /usr/local/bin/nvwm-session
+```
+
+If you use `greetd` with `tuigreet`, that is enough.
+`tuigreet` will pick up `NVWM` automatically from `/usr/share/xsessions/nvwm.desktop`.
+
+Notes:
+
+- NVWM requires X11 client libraries at build time, not XLibre server headers.
+- Multi-monitor support depends on the Xinerama extension being available and active in the running X server.
+- Existing Xorg session wrappers and `.desktop` files usually work unchanged if the display manager starts XLibre as the system X server.
 
 If you also want transparency, blur, shadows, or animations, install a compositor such as `picom`.
 
@@ -94,6 +302,9 @@ Install:
 - Fedora: `sudo dnf install picom`
 - openSUSE: `sudo zypper install picom`
 - Alpine: `sudo apk add picom`
+- NixOS / nix-shell: `nix-shell -p picom`
+- FreeBSD: `doas pkg install picom`
+- OpenBSD: `doas pkg_add picom`
 
 Autostart:
 
@@ -200,70 +411,6 @@ Your own fork:
 autostart = ~/opt/picom-custom/bin/compton --config ~/.config/nvwm/picom.conf
 ```
 
-Minimal `~/.xinitrc`:
-
-```sh
-exec nvwm
-```
-
-Recommended `~/.xinitrc` for a full session:
-
-```sh
-exec dbus-run-session sh -lc '
-export XDG_CURRENT_DESKTOP=nvwm
-export XDG_SESSION_DESKTOP=nvwm
-export DESKTOP_SESSION=nvwm
-export XCURSOR_THEME=Adwaita
-export XCURSOR_SIZE=24
-pipewire &
-wireplumber &
-exec nvwm
-'
-```
-
-The minimal form may work on some systems, but the `dbus-run-session` variant is the safer default if you want audio/session services to behave normally.
-
-
-## Greeter / XSession Example
-
-If you want to add NVWM to your greeter, one simple setup looks like this:
-
-Use a session wrapper script. Do not point the greeter directly at `nvwm`, or you may end up with a broken login session.
-
-`/usr/share/xsessions/nvwm.desktop`
-
-```ini
-[Desktop Entry]
-Name=NVWM
-Comment=Neovim Window Manager
-Exec=/usr/local/bin/nvwm-session
-Type=XSession
-DesktopNames=nvwm
-```
-
-`/usr/local/bin/nvwm-session`
-
-```sh
-#!/bin/sh
-export XDG_CURRENT_DESKTOP=nvwm
-export XDG_SESSION_DESKTOP=nvwm
-export XDG_SESSION_TYPE=x11
-
-exec dbus-run-session sh -lc '
-  /usr/local/bin/ensure-audio-session
-  exec nvwm
-'
-```
-
-Make the session launcher executable:
-
-```bash
-sudo chmod +x /usr/local/bin/nvwm-session
-```
-
-If you use `greetd` with `tuigreet`, that is enough.
-`tuigreet` will pick up `NVWM` automatically from `/usr/share/xsessions/nvwm.desktop`.
-
 ## Configuration
 
 NVWM loads config files in this order:
@@ -288,6 +435,7 @@ border_normal  = 2f3549
 terminal       = kitty
 
 bind_insert = mod+q = spawn:kitty
+bind_insert = mod+shift+q = wm:quit
 bind_insert = mod+Space = spawn:rofi -show drun
 bind_insert = mod+1 = wm:workspace:1
 bind_normal = i = wm:mode:insert
@@ -296,6 +444,15 @@ command = :q! = wm:quit
 
 Use `config.conf` for behavior, keybinds, rules, bar settings, colors, spacing, and autostart.
 
+Optional monitor power-off is controlled by `screen_off_minutes`.
+The default value, `0`, leaves it disabled. Set it above `0` to turn the monitor off after that many idle minutes:
+
+```conf
+screen_off_minutes = 10
+```
+
+NVWM applies this through `xset` at startup and when config is reloaded with `:w!`.
+
 Supported modifiers:
 
 - `mod` = Super
@@ -303,14 +460,12 @@ Supported modifiers:
 - `ctrl`
 - `alt`
 
-## Compositor
+Window border colors are configured separately from bar colors:
 
-If you want transparency, blur, shadows, rounded corners, fades, or animations, use a compositor instead of building those effects into the window manager.
+- `border_focus`: selected/focused window border
+- `border_normal`: unselected window border
 
-A sample `picom.conf` is included in the repo and can be copied after you install the `picom` build you want.
-Use the installation and activation steps from the `Choosing a picom build` section above, then adjust `~/.config/nvwm/picom.conf` for blur, transparency, rounded corners, shadows, fades, and any fork-specific animation settings you want.
-
-`nvwm` works without `picom`. The compositor is optional and not part of the default setup.
+Both values are hex RGB and can be written with or without `#`.
 
 ## Bar
 
@@ -339,7 +494,22 @@ bar_padding_x = 10
 bar_item_gap = 6
 bar_text_padding = 8
 bar_workspace_min_width = 20
+bar_bg = 1a1b26
+bar_fg = c0caf5
+bar_accent_bg = 7aa2f7
+bar_accent_fg = 1a1b26
+bar_muted_fg = 565f89
 ```
+
+Bar colors are hex RGB values. You can write them with or without `#`, for example `7aa2f7` or `#7aa2f7`.
+
+- `bar_bg`: full bar background
+- `bar_fg`: normal bar text
+- `bar_accent_bg`: active workspace / mode background
+- `bar_accent_fg`: active workspace / mode text
+- `bar_muted_fg`: inactive workspace / muted text
+
+Reload NVWM with `:w!` after changing colors.
 
 ## Modes
 
@@ -396,6 +566,7 @@ The exact behavior depends on your config, but the default setup includes:
 | Key | Action |
 | --- | --- |
 | `Super+q` | Open terminal in `INSERT` mode |
+| `Super+Shift+q` | Quit NVWM |
 | `Super+Escape` | Enter `NORMAL` mode |
 | `i` | Return to `INSERT` mode |
 | `q` | Open terminal in `NORMAL` mode |
@@ -406,6 +577,7 @@ The exact behavior depends on your config, but the default setup includes:
 | `Super+Left/Right/Up/Down` | Focus windows |
 | `Super+Ctrl+Left/Right/Up/Down` | Swap windows |
 | `Super+j / Super+k` | Focus down / up |
+| `Super+c` | Close the focused window |
 | `Print` | Screenshot the full screen |
 | `Super+f` | WM fullscreen |
 | `Super+v` | Toggle floating |
@@ -457,5 +629,6 @@ Each monitor keeps its own independent layout tree.
 
 - config files are loaded from `/etc/nvwm/config.conf`, then `./config.conf`, then `~/.config/nvwm/config.conf`
 - after `sudo make install`, copy `config.conf` into `~/.config/nvwm/config.conf` if you want a per-user config
+- use `make install PREFIX="$HOME/.local" SYSCONFDIR="$HOME/.config"` for a per-user install
 - media and brightness keys are optional
 - `Super+f` uses the WM fullscreen mode, while applications can still request real fullscreen through EWMH

@@ -1,21 +1,32 @@
-CC      = cc
-CFLAGS  = -Os -std=c99 -Wall -Wextra -pedantic -flto
-LDFLAGS = -lX11 -lXinerama
-BIN     = nvwm
-SRC     = nvwm.c
+PREFIX     ?= /usr/local
+BINDIR     ?= $(PREFIX)/bin
+SYSCONFDIR ?= /etc
+
+CC       ?= cc
+CPPFLAGS ?=
+CFLAGS   ?= -Os -std=c99 -Wall -Wextra -pedantic
+LDFLAGS  ?=
+LDLIBS   ?= -lX11 -lXinerama
+
+BIN      = nvwm
+SRC      = nvwm.c
+
+all: $(BIN)
 
 $(BIN): $(SRC)
-	$(CC) $(CFLAGS) -o $(BIN) $(SRC) $(LDFLAGS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $(BIN) $(SRC) $(LDFLAGS) $(LDLIBS)
 
 install: $(BIN)
-	install -Dm755 $(BIN)       /usr/local/bin/$(BIN)
-	install -Dm644 config.conf  /etc/nvwm/config.conf
+	mkdir -p $(DESTDIR)$(BINDIR)
+	mkdir -p $(DESTDIR)$(SYSCONFDIR)/nvwm
+	install -m 755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
+	install -m 644 config.conf $(DESTDIR)$(SYSCONFDIR)/nvwm/config.conf
 
 uninstall:
-	rm -f /usr/local/bin/$(BIN)
-	rm -f /etc/nvwm/config.conf
+	rm -f $(DESTDIR)$(BINDIR)/$(BIN)
+	rm -f $(DESTDIR)$(SYSCONFDIR)/nvwm/config.conf
 
 clean:
 	rm -f $(BIN)
 
-.PHONY: install uninstall clean
+.PHONY: all install uninstall clean

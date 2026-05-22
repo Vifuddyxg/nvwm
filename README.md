@@ -43,9 +43,16 @@ You can avoid these runtime tools by changing the matching commands in `~/.confi
 
 Session tools:
 
-- an X11 server such as Xorg or XLibre
+- one X11 server: Xorg or XLibre
 - either `startx`/`xinit` or a display manager/greeter that can start X sessions
 - `dbus-run-session` if you use the recommended full-session examples below
+
+Install exactly one X server:
+
+- Xorg: use your distro's normal Xorg server package, usually named `xorg-server`, `xserver-xorg`, or part of the BSD X sets.
+- XLibre: use your distro's XLibre package if one exists.
+
+Do not install Xorg and XLibre just for NVWM. Pick one server, then run NVWM inside that X11 session.
 
 ## Full Install Example
 
@@ -146,11 +153,11 @@ Install `xset` if you want that feature on a minimal system, or leave `screen_of
 
 ### Xserver Sessions: Xorg and XLibre
 
-NVWM runs inside a normal X11 session. You can use the traditional Xorg server or XLibre, an alternative X11 server implementation forked from X.Org Server.
+NVWM runs inside a normal X11 session. Install one X11 server, not both: the traditional Xorg server or XLibre, an alternative X11 server implementation forked from X.Org Server.
 
 NVWM does not need a separate build for XLibre. Build NVWM against the normal X11 client libraries (`libX11` and `libXinerama`) and run it inside the XLibre session.
 
-If your distribution packages XLibre, prefer those packages. The XLibre project tracks package availability on its wiki:
+If your distribution packages XLibre, prefer those packages. If not, use your distribution's normal Xorg packages. The XLibre project tracks package availability on its wiki:
 
 - https://github.com/X11Libre/xserver/wiki/Are-We-XLibre-Yet%3F
 
@@ -430,6 +437,8 @@ gap            = 8
 border         = 2
 bar_height     = 24
 bar_position   = bottom
+bar_enabled    = true
+external_bar_height = 0
 border_focus   = 7aa2f7
 border_normal  = 2f3549
 terminal       = kitty
@@ -490,6 +499,9 @@ Example:
 bar_left   = command,title,workspaces
 bar_center =
 bar_right  = battery,clock
+bar_enabled = true
+bar_height = 24
+bar_position = bottom
 bar_padding_x = 10
 bar_item_gap = 6
 bar_text_padding = 8
@@ -510,6 +522,64 @@ Bar colors are hex RGB values. You can write them with or without `#`, for examp
 - `bar_muted_fg`: inactive workspace / muted text
 
 Reload NVWM with `:w!` after changing colors.
+
+### External Bars
+
+NVWM detects external bars automatically. Any X11 bar that sets `_NET_WM_WINDOW_TYPE_DOCK` (polybar, tint2, and most common bars do this by default) is recognized as a dock window. NVWM reads the bar's reserved area from its `_NET_WM_STRUT_PARTIAL` or `_NET_WM_STRUT` hints and adjusts the tiling work area accordingly, so tiled windows never overlap the bar.
+
+This works on both top and bottom simultaneously and is independent of where the internal NVWM bar sits. For example, the internal bar can be at the bottom while polybar sits at the top — NVWM reserves space for both.
+
+**Using only an external bar (replace the built-in bar)**
+
+Disable the internal bar so only the external one is shown:
+
+```conf
+bar_enabled = false
+autostart = polybar main
+```
+
+No other setting is needed. NVWM detects polybar's height automatically when it maps.
+
+**Using an external bar alongside the built-in bar**
+
+Leave `bar_enabled = true`. Both bars coexist on different sides:
+
+```conf
+bar_enabled = true
+bar_position = bottom
+autostart = polybar main
+```
+
+NVWM reserves space at the bottom for its own bar and at the top for polybar.
+
+**Bars started outside the NVWM autostart**
+
+If the external bar is launched from `.xinitrc` or a display manager session script before NVWM starts, NVWM scans all existing windows at startup and picks it up automatically.
+
+**`external_bar_height` override**
+
+You normally do not need this setting. Use it only if the bar does not advertise strut hints or if you want to force a specific reserved height:
+
+```conf
+external_bar_height = 30
+```
+
+Set it to `0` (the default) to let NVWM auto-detect from the bar's own hints. Setting it to a positive number overrides auto-detection for the side matching `bar_position`.
+
+**Fullscreen behavior**
+
+Dock windows are kept above tiled windows at all times. When a client enters EWMH real fullscreen (such as a browser video player), dock windows are lowered so the fullscreen content covers the whole screen. They are raised again when fullscreen exits.
+
+**Good X11 bar choices**
+
+- `polybar`: full-featured, practical default for X11.
+- `lemonbar`: very small and script-driven.
+- `tint2`: panel/taskbar style, useful if you want a more traditional desktop panel.
+- `eww`: flexible widget system for custom bars.
+- `xmobar`: good if you like a text/status oriented bar.
+- `dzen2`: old but simple and lightweight.
+
+Install only the bar you plan to use. NVWM does not require any external bar.
 
 ## Modes
 

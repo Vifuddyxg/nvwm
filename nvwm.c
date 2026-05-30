@@ -1041,6 +1041,8 @@ static void retile(void) {
             showtree(mon_tree(i));
             tilenode(mon_tree(i), m->wx, m->wy, m->ww, m->wh, mon_focused(i));
             raise_floating(mon_tree(i));
+            Node *foc_i = mon_focused(i);
+            if (foc_i && (foc_i->floating || foc_i->fullscreen)) XRaiseWindow(dpy, foc_i->win);
         }
         if (barenabled && m->barwin && !find_real_fullscreen_leaf(mon_tree(i))) XRaiseWindow(dpy, m->barwin);
     }
@@ -1062,9 +1064,8 @@ static void setfocus(int mi, Node *n, int warp) {
     curmon = mi;
     if (prev && prev != n) drawborder(prev, 0);
     if (mode == MODE_INSERT) XSetInputFocus(dpy, n->win, RevertToPointerRoot, CurrentTime);
-    if (n->floating || n->fullscreen || n->real_fullscreen) XRaiseWindow(dpy, n->win);
     drawborder(n, 1);
-    raise_floating(mon_tree(mi));
+    if (n->floating || n->fullscreen || n->real_fullscreen) XRaiseWindow(dpy, n->win);
     if (barenabled && mons[mi].barwin) XRaiseWindow(dpy, mons[mi].barwin);
     if (warp) warpfocus(n);
     update_active_window();

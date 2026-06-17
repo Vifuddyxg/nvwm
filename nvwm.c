@@ -1498,7 +1498,21 @@ static void switch_workspace_on(int mi, int ws) {
     else if (mi == curmon) update_active_window();
 }
 
-static void switch_workspace(int ws) { switch_workspace_on(curmon, ws); }
+/* the monitor the user is looking at: the one under the pointer */
+static int pointer_mon(void) {
+    Window dw; int rx, ry, wx, wy; unsigned int msk;
+    if (XQueryPointer(dpy, root, &dw, &dw, &rx, &ry, &wx, &wy, &msk))
+        return monforpt(rx, ry);
+    return curmon;
+}
+
+/* keyboard workspace switching acts on the monitor under the pointer, so it
+   never targets a stale curmon left on another monitor (matches scroll-wheel) */
+static void switch_workspace(int ws) {
+    int mi = pointer_mon();
+    curmon = mi;
+    switch_workspace_on(mi, ws);
+}
 
 static void attach_to_ws(int mi, int ws, Node *leaf) {
     leaf->par = NULL;
@@ -1573,6 +1587,20 @@ static void collect_leaves(Node *n, Node **list, int *count, int maxcount) {
     }
     collect_leaves(n->a, list, count, maxcount);
     collect_leaves(n->b, list, count, maxcount);
+}
+
+/* tiled (non-floating) leaf on monitor mi whose tile rect holds (px,py) */
+static Node *tiled_leaf_at(int mi, int px, int py) {
+    Node *list[64];
+    int cnt = 0;
+    collect_leaves(mon_tree(mi), list, &cnt, 64);
+    for (int i = 0; i < cnt; i++) {
+        Node *n = list[i];
+        if (n->floating) continue;
+        if (px >= n->x && px < n->x + n->w && py >= n->y && py < n->y + n->h)
+            return n;
+    }
+    return NULL;
 }
 
 static int interval_overlap(int a1, int a2, int b1, int b2) {
@@ -2686,11 +2714,13 @@ static int apply_wm_action(const char *action) {
         return 1;
     }
     if (!strcmp(action, "wm:workspace_prev")) {
-        switch_workspace((mons[curmon].curws + MAXWS - 1) % MAXWS);
+        int mi = pointer_mon();
+        switch_workspace((mons[mi].curws + MAXWS - 1) % MAXWS);
         return 1;
     }
     if (!strcmp(action, "wm:workspace_next")) {
-        switch_workspace((mons[curmon].curws + 1) % MAXWS);
+        int mi = pointer_mon();
+        switch_workspace((mons[mi].curws + 1) % MAXWS);
         return 1;
     }
     if (!strncmp(action, "wm:move_to_workspace:", 21)) {
@@ -3275,17 +3305,7 @@ int main(void) {
             }
             if (!n || (ev.xbutton.button != Button1 && ev.xbutton.button != Button3)) break;
 
-            if (!n->real_fullscreen && !n->floating && ev.xbutton.button == Button1) {
-                int fx = n->x + gap;
-                int fy = n->y + gap;
-                int fw = n->w - 2 * gap;
-                int fh = n->h - 2 * gap;
-                if (fw < 50) fw = 50;
-                if (fh < 50) fh = 50;
-                n->floating = 1;
-                XMoveResizeWindow(dpy, n->win, fx, fy, fw - 2 * bw, fh - 2 * bw);
-                retile();
-            }
+            int is_btn1 = (ev.xbutton.button == Button1);
 
             if (n != mon_focused(mi)) setfocus(mi, n, 1);
             else {
@@ -3304,11 +3324,18 @@ int main(void) {
             drag_oy = ev.xbutton.y_root;
             drag_node = n;
             drag_mon = mi;
-            drag_mode = ev.xbutton.button == Button1 ? 1 : 2;
+            /* Super+Button1 on a tiled window reorders (swaps) it in the
+               direction you drag instead of detaching it to floating */
+            if (is_btn1 && !n->real_fullscreen && !n->floating)
+                drag_mode = 3;
+            else if (is_btn1)
+                drag_mode = 1;   /* floating: move */
+            else
+                drag_mode = 2;   /* Button3: resize floating / split ratio */
 
             XGrabPointer(dpy, root, False, PointerMotionMask | ButtonReleaseMask,
                 GrabModeAsync, GrabModeAsync, None,
-                drag_mode == 1 ? movecursor : resizecursor, CurrentTime);
+                drag_mode == 2 ? resizecursor : movecursor, CurrentTime);
             break;
         }
 
@@ -3354,7 +3381,19 @@ int main(void) {
             {
                 int dx = ev.xmotion.x_root - drag_ox;
                 int dy = ev.xmotion.y_root - drag_oy;
-                if (drag_mode == 1) {
+                if (drag_mode == 3) {
+                    /* swap with whatever tiled window we are hovering, then
+                       follow our window into its new slot so the drag keeps
+                       pushing it in the direction of travel */
+                    Node *t = tiled_leaf_at(drag_mon,
+                        ev.xmotion.x_root, ev.xmotion.y_root);
+                    if (t && t != drag_node && !t->floating) {
+                        swap_leaf_payload(drag_node, t);
+                        retile();
+                        drag_node = t;
+                        setfocus(drag_mon, drag_node, 0);
+                    }
+                } else if (drag_mode == 1) {
                     int nx = drag_wx + dx;
                     int ny = drag_wy + dy;
                     Mon *dm = &mons[drag_mon];

@@ -152,6 +152,7 @@ static Atom atom_net_wm_strut;
 static Atom atom_net_wm_strut_partial;
 static Atom atom_wm_protocols;
 static Atom atom_wm_delete_window;
+static Atom atom_net_wm_pid;
 static char cached_title[256];
 static char cmdline[CMDLINE_MAX];
 static int cmdline_len;
@@ -1113,6 +1114,7 @@ static void initatoms(void) {
     atom_net_wm_strut_partial = XInternAtom(dpy, "_NET_WM_STRUT_PARTIAL", False);
     atom_wm_protocols = XInternAtom(dpy, "WM_PROTOCOLS", False);
     atom_wm_delete_window = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+    atom_net_wm_pid = XInternAtom(dpy, "_NET_WM_PID", False);
 }
 
 static void setup_wm_check(void) {
@@ -1479,6 +1481,84 @@ static void close_window(Window win) {
     }
 
     XDestroyWindow(dpy, win);
+}
+
+static pid_t window_pid(Window win) {
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems, bytes_after;
+    unsigned char *data = NULL;
+    pid_t pid = 0;
+    if (XGetWindowProperty(dpy, win, atom_net_wm_pid, 0, 1, False,
+            XA_CARDINAL, &actual_type, &actual_format, &nitems, &bytes_after,
+            &data) == Success && data && nitems >= 1) {
+        pid = (pid_t)*(unsigned long *)(void *)data;
+    }
+    if (data) XFree(data);
+    return pid;
+}
+
+/* a window we must never touch: WM internals, the bar and any dock/panel */
+static int window_is_protected(Window win) {
+    if (win == root || win == wmcheckwin) return 1;
+    for (int i = 0; i < nmons; i++)
+        if (win == mons[i].barwin) return 1;
+    if (dock_index(win) >= 0 || window_is_dock(win)) return 1;
+    return 0;
+}
+
+/* :clear — hard "debloat" reset, like rebooting the laptop without
+   leaving the session. Kills every client application across all
+   monitors/workspaces, including ones that ignore WM_DELETE_WINDOW
+   (Stremio & friends) or sit minimized in a tray, by signalling their
+   process (_NET_WM_PID) and force-disconnecting the rest (XKillClient).
+   The WM, the bar, docks/compositor and pure background services
+   (audio, dbus, ...) own no app window here, so they survive. */
+static void clear_all_windows(void) {
+    pid_t pids[512];
+    int npids = 0;
+    pid_t self = getpid();
+
+    Window *tree = NULL;
+    Window d1, d2;
+    unsigned int num = 0;
+
+    /* enumerate every top-level window, not just the tiling tree, so we
+       also catch tray-minimized and otherwise untracked client windows */
+    if (!XQueryTree(dpy, root, &d1, &d2, &tree, &num)) return;
+
+    for (unsigned int i = 0; i < num; i++) {
+        Window win = tree[i];
+        if (window_is_protected(win)) continue;
+
+        XWindowAttributes wa;
+        if (!XGetWindowAttributes(dpy, win, &wa)) continue;
+        if (wa.override_redirect) continue;       /* menus, tooltips, etc. */
+        if (wa.class != InputOutput) continue;
+
+        pid_t pid = window_pid(win);
+        if (pid > 0 && pid != self) {
+            int seen = 0;
+            for (int j = 0; j < npids; j++)
+                if (pids[j] == pid) { seen = 1; break; }
+            if (!seen && npids < (int)(sizeof pids / sizeof pids[0]))
+                pids[npids++] = pid;
+        } else {
+            /* no usable PID: ask nicely, then sever the X connection */
+            close_window(win);
+            XKillClient(dpy, win);
+        }
+    }
+    if (tree) XFree(tree);
+
+    /* give processes a brief chance to exit cleanly, then make sure */
+    for (int i = 0; i < npids; i++) kill(pids[i], SIGTERM);
+    if (npids) {
+        struct timespec ts = { 0, 300000000L };  /* 300 ms */
+        nanosleep(&ts, NULL);
+        for (int i = 0; i < npids; i++) kill(pids[i], SIGKILL);
+    }
+    XFlush(dpy);
 }
 
 static void spawn(const char *cmd) {
@@ -1970,6 +2050,10 @@ static int apply_wm_action(const char *action) {
         if (mon_focused(curmon)) close_window(mon_focused(curmon)->win);
         return 1;
     }
+    if (!strcmp(action, "wm:clear")) {
+        clear_all_windows();
+        return 1;
+    }
     if (!strcmp(action, "wm:reload")) {
         reloadwm();
         return 1;
@@ -2044,6 +2128,10 @@ static int apply_wm_action(const char *action) {
     }
     if (!strncmp(action, "wm:move_to_workspace:", 21)) {
         move_focused_to_workspace(atoi(action + 21) - 1);
+        return 1;
+    }
+    if (!strncmp(action, "wm:move_to_workspace_follow:", 28)) {
+        move_focused_to_workspace_and_follow(atoi(action + 28) - 1);
         return 1;
     }
     if (!strcmp(action, "wm:move_to_workspace_prev")) {
@@ -2381,6 +2469,20 @@ int main(void) {
         ButtonPressMask | ButtonReleaseMask,
         GrabModeAsync, GrabModeAsync, None, None);
 
+    /* scroll wheel: MOD = switch workspace, MOD+Ctrl = move focused window
+       to prev/next workspace and follow it */
+    {
+        unsigned int locks[] = { 0, LockMask, numlockmask, numlockmask | LockMask };
+        unsigned int scrollmods[] = { MOD, MOD | ControlMask };
+        int scrollbtns[] = { Button4, Button5 };
+        for (int b = 0; b < 2; b++)
+            for (int m = 0; m < 2; m++)
+                for (int l = 0; l < 4; l++)
+                    XGrabButton(dpy, scrollbtns[b], scrollmods[m] | locks[l], root,
+                        False, ButtonPressMask, GrabModeAsync, GrabModeAsync,
+                        None, None);
+    }
+
     while (running) {
         while (XPending(dpy)) {
             XEvent ev;
@@ -2569,6 +2671,21 @@ int main(void) {
             break;
 
         case ButtonPress: {
+            if (ev.xbutton.button == Button4 || ev.xbutton.button == Button5) {
+                unsigned int st = ev.xbutton.state &
+                    (ShiftMask | ControlMask | Mod1Mask | Mod4Mask | LockMask | numlockmask);
+                st &= ~(LockMask | numlockmask);
+                /* wheel up = next workspace, wheel down = previous */
+                int next = (ev.xbutton.button == Button4);
+                int targetws = next ? (curws + 1) % MAXWS
+                                    : (curws + MAXWS - 1) % MAXWS;
+                if (st == MOD)
+                    switch_workspace(targetws);
+                else if (st == (MOD | ControlMask))
+                    move_focused_to_workspace_and_follow(targetws);
+                break;
+            }
+
             Window clicked = ev.xbutton.subwindow ? ev.xbutton.subwindow : ev.xbutton.window;
             if (clicked == root) break;
 

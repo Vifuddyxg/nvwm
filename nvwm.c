@@ -2793,6 +2793,19 @@ static int apply_wm_action(const char *action) {
         XRaiseWindow(dpy, mon_focused(curmon)->win);
         return 1;
     }
+    if (!strcmp(action, "wm:toggle_real_fullscreen")) {
+        Node *foc = mon_focused(curmon);
+        if (!foc) return 1;
+        foc->real_fullscreen ^= 1;
+        if (foc->real_fullscreen) {
+            foc->fullscreen = 0;
+            foc->floating = 0;
+        }
+        set_net_wm_state(foc->win, foc->real_fullscreen);
+        retile();
+        XRaiseWindow(dpy, foc->win);
+        return 1;
+    }
     if (!strcmp(action, "wm:screenshot")) {
         screenshot();
         return 1;

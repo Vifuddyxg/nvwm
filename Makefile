@@ -6,7 +6,7 @@ CC       ?= cc
 CPPFLAGS ?=
 CFLAGS   ?= -Os -std=c99 -Wall -Wextra -pedantic
 LDFLAGS  ?=
-LDLIBS   ?= -lX11 -lXinerama
+LDLIBS   ?= -lX11 -lXinerama -lXrandr -lXcomposite -lXrender
 
 BIN      = nvwm
 SRC      = nvwm.c

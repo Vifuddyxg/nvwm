@@ -8,6 +8,9 @@
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
 #include <X11/extensions/Xinerama.h>
+#include <X11/extensions/Xrandr.h>
+#include <X11/extensions/Xcomposite.h>
+#include <X11/extensions/Xrender.h>
 #include <signal.h>
 #include <limits.h>
 #include <sys/select.h>
@@ -39,6 +42,8 @@ struct Node {
     Node *a, *b, *par;
     Window win;
     int x, y, w, h;
+    Pixmap thumb;          /* WM-owned snapshot of window contents, 0 if none */
+    int thumb_w, thumb_h;
 };
 
 typedef struct {
@@ -70,6 +75,7 @@ typedef struct {
 typedef struct {
     int x, y, w, h;
     int wx, wy, ww, wh;
+    int curws;
     Node *tree[MAXWS], *focused[MAXWS];
     Window barwin;
     Pixmap barpix;
@@ -104,7 +110,25 @@ static Window root;
 static int sw, sh;
 static Mon mons[MAXMONS];
 static int nmons = 1, curmon;
-static int curws;
+static int randr_active = 0;
+static int randr_event_base = -1;
+/* index of the monitor whose bar is currently being drawn (per-monitor curws) */
+static int barmon = 0;
+/* workspace overview (Super+Z) state */
+static int overview_active = 0;
+static int overview_sel = 0;
+static int overview_mon = 0;
+static Window overview_win = 0;
+static Pixmap overview_pix = 0;
+/* XComposite + XRender: present and redirect active -> live thumbnails */
+static int composite_ok = 0;
+/* drag-to-move inside the overview */
+static int ov_drag = 0;            /* a press is in progress */
+static Node *ov_drag_node = NULL;  /* leaf being dragged, NULL if empty-cell press */
+static int ov_drag_ws = -1;        /* workspace the press started on */
+static int ov_press_rx = 0, ov_press_ry = 0; /* press point (root coords) */
+static int ov_ptr_x = 0, ov_ptr_y = 0;       /* current pointer (monitor-local) */
+static int ov_moved = 0;           /* moved past click threshold */
 static Window wmcheckwin;
 static ModBind modbinds[MAXBINDS];
 static int nmodbinds;
@@ -174,6 +198,12 @@ static void setupbars(void);
 static void enter_mode(InputMode newmode);
 static Node *mon_focused(int mi);
 static void showtree(Node *n);
+static void hidetree(Node *n);
+static void close_overview(void);
+static void capture_thumb(Node *n);
+static void capture_tree(Node *n);
+static void free_thumb(Node *n);
+static void init_composite(void);
 static void spawn(const char *cmd);
 static void initatoms(void);
 static void apply_rules(Node *n, int *targetws, int *out_follow);
@@ -187,6 +217,11 @@ static void setup_wm_check(void);
 static void reloadwm(void);
 static void collect_leaves(Node *n, Node **list, int *count, int maxcount);
 static void free_tree(Node *n);
+static int querygeom(Mon *out, int max);
+static int updategeom(void);
+static void retile(void);
+static void setfocus(int mi, Node *n, int warp);
+static void attach_to_ws(int mi, int ws, Node *leaf);
 static void wait_for_x_event_or_clock_tick(void);
 static void apply_screen_off_config(void);
 static void close_window(Window win);
@@ -508,11 +543,11 @@ static int monforpt(int x, int y) {
 }
 
 static Node *mon_tree(int mi) {
-    return mons[mi].tree[curws];
+    return mons[mi].tree[mons[mi].curws];
 }
 
 static Node *mon_focused(int mi) {
-    return mons[mi].focused[curws];
+    return mons[mi].focused[mons[mi].curws];
 }
 
 static Node *mon_tree_at(int mi, int ws) {
@@ -524,7 +559,7 @@ static Node *mon_focused_at(int mi, int ws) {
 }
 
 static void mon_setfocused(int mi, Node *n) {
-    mons[mi].focused[curws] = n;
+    mons[mi].focused[mons[mi].curws] = n;
 }
 
 static void mon_settree_at(int mi, int ws, Node *n) {
@@ -643,13 +678,6 @@ static Node *find_real_fullscreen_leaf(Node *n) {
     return r ? r : find_real_fullscreen_leaf(n->b);
 }
 
-static int workspace_has_windows(int ws) {
-    for (int i = 0; i < nmons; i++) {
-        if (mons[i].tree[ws]) return 1;
-    }
-    return 0;
-}
-
 static Node *nextleaf(int mi, Node *cur) {
     Node *tree = mon_tree(mi);
     if (!cur || !tree) return firstleaf(tree);
@@ -706,6 +734,110 @@ static void swap_leaf_payload(Node *a, Node *b) {
     fstmp = a->real_fullscreen;
     a->real_fullscreen = b->real_fullscreen;
     b->real_fullscreen = fstmp;
+    /* thumbnails follow their window */
+    { Pixmap ptmp = a->thumb; a->thumb = b->thumb; b->thumb = ptmp; }
+    ftmp = a->thumb_w; a->thumb_w = b->thumb_w; b->thumb_w = ftmp;
+    ftmp = a->thumb_h; a->thumb_h = b->thumb_h; b->thumb_h = ftmp;
+}
+
+/* ---- XComposite/XRender live thumbnails ---- */
+
+/* largest stored thumbnail edge; windows are downscaled to this once at
+   capture time so the overview only ever rescales a small pixmap */
+#define THUMB_CAP 512
+
+static void init_composite(void) {
+    int evb, erb;
+    if (!XCompositeQueryExtension(dpy, &evb, &erb)) return;
+    int maj = 0, min = 0;
+    XCompositeQueryVersion(dpy, &maj, &min);
+    /* XCompositeNameWindowPixmap needs >= 0.2 */
+    if (maj == 0 && min < 2) return;
+    if (!XRenderQueryExtension(dpy, &evb, &erb)) return;
+    /* Automatic: the server keeps painting windows normally on screen, we
+       just gain access to their off-screen pixmaps for the overview */
+    XCompositeRedirectSubwindows(dpy, root, CompositeRedirectAutomatic);
+    composite_ok = 1;
+}
+
+static void free_thumb(Node *n) {
+    if (n && n->thumb) {
+        XFreePixmap(dpy, n->thumb);
+        n->thumb = 0;
+        n->thumb_w = n->thumb_h = 0;
+    }
+}
+
+/* blit a source pixmap scaled to fit dst rect via XRender (bilinear) */
+static void render_scaled(Picture dst, Pixmap srcpix, int sw_, int sh_,
+                          int dx, int dy, int dw, int dh) {
+    if (sw_ < 1 || sh_ < 1 || dw < 1 || dh < 1) return;
+    int s = DefaultScreen(dpy);
+    XRenderPictFormat *fmt = XRenderFindVisualFormat(dpy, DefaultVisual(dpy, s));
+    if (!fmt) return;
+    Picture src = XRenderCreatePicture(dpy, srcpix, fmt, 0, NULL);
+    /* transform maps dst coords -> src coords, so the diagonal is src/dst */
+    XTransform xf = {{
+        { XDoubleToFixed((double)sw_ / dw), 0, 0 },
+        { 0, XDoubleToFixed((double)sh_ / dh), 0 },
+        { 0, 0, XDoubleToFixed(1.0) }
+    }};
+    XRenderSetPictureTransform(dpy, src, &xf);
+    XRenderSetPictureFilter(dpy, src, FilterBilinear, NULL, 0);
+    XRenderComposite(dpy, PictOpSrc, src, None, dst, 0, 0, 0, 0, dx, dy, dw, dh);
+    XRenderFreePicture(dpy, src);
+}
+
+/* snapshot one viewable window into its node's cached thumb pixmap */
+static void capture_thumb(Node *n) {
+    if (!composite_ok || !n || !n->leaf || !n->win) return;
+    XWindowAttributes wa;
+    if (!XGetWindowAttributes(dpy, n->win, &wa)) return;
+    if (wa.map_state != IsViewable || wa.width < 1 || wa.height < 1) return;
+
+    XRenderPictFormat *sfmt = XRenderFindVisualFormat(dpy, wa.visual);
+    if (!sfmt) return;
+    Pixmap wp = XCompositeNameWindowPixmap(dpy, n->win);
+    if (!wp) return;
+
+    /* the named pixmap spans the window plus its border */
+    int srcw = wa.width + 2 * wa.border_width;
+    int srch = wa.height + 2 * wa.border_width;
+    double scale = 1.0;
+    int mx = srcw > srch ? srcw : srch;
+    if (mx > THUMB_CAP) scale = (double)THUMB_CAP / mx;
+    int tw = (int)(srcw * scale); if (tw < 1) tw = 1;
+    int th = (int)(srch * scale); if (th < 1) th = 1;
+
+    int s = DefaultScreen(dpy);
+    if (n->thumb && (n->thumb_w != tw || n->thumb_h != th)) free_thumb(n);
+    if (!n->thumb) {
+        n->thumb = XCreatePixmap(dpy, root, tw, th, DefaultDepth(dpy, s));
+        n->thumb_w = tw;
+        n->thumb_h = th;
+    }
+
+    Picture src = XRenderCreatePicture(dpy, wp, sfmt, 0, NULL);
+    Picture dst = XRenderCreatePicture(dpy, n->thumb,
+        XRenderFindVisualFormat(dpy, DefaultVisual(dpy, s)), 0, NULL);
+    XTransform xf = {{
+        { XDoubleToFixed(1.0 / scale), 0, 0 },
+        { 0, XDoubleToFixed(1.0 / scale), 0 },
+        { 0, 0, XDoubleToFixed(1.0) }
+    }};
+    XRenderSetPictureTransform(dpy, src, &xf);
+    XRenderSetPictureFilter(dpy, src, FilterBilinear, NULL, 0);
+    XRenderComposite(dpy, PictOpSrc, src, None, dst, 0, 0, 0, 0, 0, 0, tw, th);
+    XRenderFreePicture(dpy, src);
+    XRenderFreePicture(dpy, dst);
+    XFreePixmap(dpy, wp);
+}
+
+static void capture_tree(Node *n) {
+    if (!n) return;
+    if (n->leaf) { capture_thumb(n); return; }
+    capture_tree(n->a);
+    capture_tree(n->b);
 }
 
 static void drawborder(Node *n, int focused) {
@@ -841,11 +973,17 @@ static void build_bar_item_text(BarItem item, char *dst, size_t dstsz) {
     }
 }
 
+/* a workspace is shown on monitor mi's bar if that monitor holds windows
+   there, or it is that monitor's current workspace */
+static int mon_ws_visible_in_bar(int mi, int ws) {
+    return mons[mi].tree[ws] != NULL || ws == mons[mi].curws;
+}
+
 static int workspace_section_width(void) {
     int width = 0;
     for (int i = 0; i < MAXWS; i++) {
         char part[8];
-        if (!workspace_has_windows(i) && i != curws) continue;
+        if (!mon_ws_visible_in_bar(barmon, i)) continue;
         snprintf(part, sizeof part, "%d", i + 1);
         width += textw(part) + bartextpad * 2 + baritemgap;
     }
@@ -857,12 +995,12 @@ static int draw_workspace_section(Window win, int x, int y) {
     for (int i = 0; i < MAXWS; i++) {
         char part[8];
         unsigned long bg = barbg, fg = barmutedfg;
-        if (!workspace_has_windows(i) && i != curws) continue;
+        if (!mon_ws_visible_in_bar(barmon, i)) continue;
         snprintf(part, sizeof part, "%d", i + 1);
-        if (i == curws) {
+        if (i == mons[barmon].curws) {
             bg = baraccentbg;
             fg = baraccentfg;
-        } else if (workspace_has_windows(i)) {
+        } else if (mons[barmon].tree[i]) {
             fg = barfg;
         }
         curx += draw_tag_box(win, curx, y, part, bg, fg, barwsminw);
@@ -956,6 +1094,7 @@ static int draw_section(Window win, int x, int y, const char *cfg) {
 static void drawbar(int mi) {
     Mon *m = &mons[mi];
     if (!m->barwin) return;
+    barmon = mi;
 
     if (!m->barpix)
         m->barpix = XCreatePixmap(dpy, m->barwin, m->w, barh, DefaultDepth(dpy, DefaultScreen(dpy)));
@@ -1088,8 +1227,98 @@ static void free_tree(Node *n) {
     if (!n->leaf) {
         free_tree(n->a);
         free_tree(n->b);
+    } else {
+        free_thumb(n);
     }
     free(n);
+}
+
+/* free only the internal split nodes of a tree, leaving leaf nodes intact */
+static void free_splits(Node *n) {
+    if (!n || n->leaf) return;
+    free_splits(n->a);
+    free_splits(n->b);
+    free(n);
+}
+
+/* fill out[] with current monitor geometry via Xinerama; returns monitor count */
+static int querygeom(Mon *out, int max) {
+    int n = 0;
+    if (XineramaIsActive(dpy)) {
+        XineramaScreenInfo *xi = XineramaQueryScreens(dpy, &n);
+        if (xi) {
+            if (n > max) n = max;
+            for (int i = 0; i < n; i++) {
+                out[i].x = xi[i].x_org;
+                out[i].y = xi[i].y_org;
+                out[i].w = xi[i].width;
+                out[i].h = xi[i].height;
+            }
+            XFree(xi);
+        }
+    }
+    if (n < 1) {
+        n = 1;
+        out[0].x = 0;
+        out[0].y = 0;
+        out[0].w = DisplayWidth(dpy, DefaultScreen(dpy));
+        out[0].h = DisplayHeight(dpy, DefaultScreen(dpy));
+    }
+    return n;
+}
+
+/* re-read monitor layout after a hotplug/resolution change.
+ * Returns 1 if the layout changed (caller should rebuild bars and retile). */
+static int updategeom(void) {
+    Mon ng[MAXMONS];
+    int nn = querygeom(ng, MAXMONS);
+
+    int changed = (nn != nmons);
+    for (int i = 0; i < nn && !changed; i++) {
+        if (ng[i].x != mons[i].x || ng[i].y != mons[i].y ||
+            ng[i].w != mons[i].w || ng[i].h != mons[i].h) changed = 1;
+    }
+    if (!changed) return 0;
+    if (overview_active) close_overview();
+
+    /* monitors removed: migrate their windows onto the last surviving monitor */
+    if (nn < nmons) {
+        int target = nn - 1;
+        for (int mi = nn; mi < nmons; mi++) {
+            for (int ws = 0; ws < MAXWS; ws++) {
+                Node *tree = mons[mi].tree[ws];
+                if (!tree) continue;
+                Node *leaves[256];
+                int cnt = 0;
+                collect_leaves(tree, leaves, &cnt, 256);
+                mons[mi].tree[ws] = NULL;
+                mons[mi].focused[ws] = NULL;
+                free_splits(tree);
+                for (int k = 0; k < cnt; k++) {
+                    Node *lf = leaves[k];
+                    lf->par = NULL;
+                    lf->a = lf->b = NULL;
+                    attach_to_ws(target, ws, lf);
+                }
+            }
+        }
+        /* hide windows migrated onto a non-current workspace of the target */
+        for (int ws = 0; ws < MAXWS; ws++)
+            if (ws != mons[target].curws) hidetree(mons[target].tree[ws]);
+    }
+
+    for (int i = 0; i < nn; i++) {
+        mons[i].x = ng[i].x;
+        mons[i].y = ng[i].y;
+        mons[i].w = ng[i].w;
+        mons[i].h = ng[i].h;
+    }
+    nmons = nn;
+    if (curmon >= nmons) curmon = nmons - 1;
+
+    sw = DisplayWidth(dpy, DefaultScreen(dpy));
+    sh = DisplayHeight(dpy, DefaultScreen(dpy));
+    return 1;
 }
 
 static void initatoms(void) {
@@ -1173,7 +1402,7 @@ static void update_client_list(void) {
 }
 
 static void update_current_desktop(void) {
-    unsigned long ws = (unsigned long)curws;
+    unsigned long ws = (unsigned long)mons[curmon].curws;
     XChangeProperty(dpy, root, atom_net_current_desktop, XA_CARDINAL, 32, PropModeReplace,
         (unsigned char *)&ws, 1);
 }
@@ -1200,6 +1429,7 @@ static void set_window_desktop(Window win, int ws) {
 static void apply_rules(Node *n, int *targetws, int *out_follow) {
     char class_name[64], instance_name[64], title[128];
     int want_follow = 0;
+    int base_ws = targetws ? *targetws : 0;
     if (!n || !n->leaf) return;
     get_window_class(n->win, class_name, sizeof class_name, instance_name, sizeof instance_name);
     get_window_title(n->win, title, sizeof title);
@@ -1220,9 +1450,9 @@ static void apply_rules(Node *n, int *targetws, int *out_follow) {
 
     /* follow_class: if no explicit workspace rule fired, find existing window
        of same class on another workspace and follow it */
-    if (want_follow && targetws && *targetws == curws && class_name[0]) {
+    if (want_follow && targetws && *targetws == base_ws && class_name[0]) {
         for (int ws = 0; ws < MAXWS; ws++) {
-            if (ws == curws) continue;
+            if (ws == base_ws) continue;
             int found = 0;
             for (int mi = 0; mi < nmons && !found; mi++) {
                 Node *leaves[256];
@@ -1253,16 +1483,22 @@ static void hidetree(Node *n) {
     hidetree(n->b);
 }
 
-static void switch_workspace(int ws) {
-    if (ws < 0 || ws >= MAXWS || ws == curws) return;
-    for (int i = 0; i < nmons; i++) hidetree(mons[i].tree[curws]);
-    curws = ws;
-    for (int i = 0; i < nmons; i++) showtree(mons[i].tree[curws]);
+/* switch only monitor mi to workspace ws; other monitors keep their own */
+static void switch_workspace_on(int mi, int ws) {
+    if (mi < 0 || mi >= nmons || ws < 0 || ws >= MAXWS || ws == mons[mi].curws) return;
+    /* snapshot the windows we are about to hide so the overview can still
+       show their contents while they are unmapped */
+    if (composite_ok) capture_tree(mons[mi].tree[mons[mi].curws]);
+    hidetree(mons[mi].tree[mons[mi].curws]);
+    mons[mi].curws = ws;
+    showtree(mons[mi].tree[ws]);
     retile();
-    update_current_desktop();
-    if (mon_focused(curmon)) setfocus(curmon, mon_focused(curmon), 1);
-    else update_active_window();
+    if (mi == curmon) update_current_desktop();
+    if (mon_focused(mi)) setfocus(mi, mon_focused(mi), 1);
+    else if (mi == curmon) update_active_window();
 }
+
+static void switch_workspace(int ws) { switch_workspace_on(curmon, ws); }
 
 static void attach_to_ws(int mi, int ws, Node *leaf) {
     leaf->par = NULL;
@@ -1292,7 +1528,7 @@ static void attach_to_ws(int mi, int ws, Node *leaf) {
     update_client_list();
 }
 
-static void attach(int mi, Node *leaf) { attach_to_ws(mi, curws, leaf); }
+static void attach(int mi, Node *leaf) { attach_to_ws(mi, mons[mi].curws, leaf); }
 
 static void detach_from_ws(int mi, int ws, Node *n) {
     if (!n->par) {
@@ -1312,7 +1548,7 @@ static void detach_from_ws(int mi, int ws, Node *n) {
     update_client_list();
 }
 
-static void detach(int mi, Node *n) { detach_from_ws(mi, curws, n); }
+static void detach(int mi, Node *n) { detach_from_ws(mi, mons[mi].curws, n); }
 
 static void removewin(Window w) {
     int mi = 0, ws = 0;
@@ -1322,6 +1558,8 @@ static void removewin(Window w) {
         drag_node = NULL;
         drag_mode = 0;
     }
+    if (ov_drag_node == n) { ov_drag_node = NULL; ov_drag = 0; }
+    free_thumb(n);
     detach_from_ws(mi, ws, n);
     free(n);
     update_active_window();
@@ -1421,10 +1659,11 @@ static int swap_in_direction(const char *dir) {
 static void move_focused_to_workspace(int targetws) {
     Node *n;
     int srcmon = curmon;
-    if (targetws < 0 || targetws >= MAXWS || targetws == curws) return;
+    int srcws = mons[srcmon].curws;
+    if (targetws < 0 || targetws >= MAXWS || targetws == srcws) return;
     n = mon_focused(srcmon);
     if (!n) return;
-    detach_from_ws(srcmon, curws, n);
+    detach_from_ws(srcmon, srcws, n);
     attach_to_ws(srcmon, targetws, n);
     hidetree(n);
     retile();
@@ -1432,9 +1671,332 @@ static void move_focused_to_workspace(int targetws) {
 }
 
 static void move_focused_to_workspace_and_follow(int targetws) {
-    if (targetws < 0 || targetws >= MAXWS || targetws == curws) return;
+    if (targetws < 0 || targetws >= MAXWS || targetws == mons[curmon].curws) return;
     move_focused_to_workspace(targetws);
     switch_workspace(targetws);
+}
+
+/* ---- workspace overview (Super+Z), niri-style schematic ---- */
+
+#define OV_COLS 3
+#define OV_ROWS 3
+
+/* mirror of tilenode's split math, drawing scaled boxes instead of moving
+   real windows; used to render a miniature of a workspace in the overview */
+static void overview_draw_node(Node *n, int x, int y, int w, int h, Node *foc,
+                               Picture pic) {
+    if (!n || w < 2 || h < 2) return;
+    if (n->leaf) {
+        int focused = (n == foc);
+        if (pic && n->thumb) {
+            /* live (or last-seen) window contents */
+            render_scaled(pic, n->thumb, n->thumb_w, n->thumb_h,
+                          x + 1, y + 1, w - 2, h - 2);
+        } else {
+            unsigned long bg = focused ? baraccentbg : cnorm;
+            XSetForeground(dpy, bargc, bg);
+            XFillRectangle(dpy, overview_pix, bargc, x + 1, y + 1, w - 2, h - 2);
+        }
+        XSetForeground(dpy, bargc, focused ? baraccentbg : barbg);
+        XDrawRectangle(dpy, overview_pix, bargc, x, y, w - 1, h - 1);
+        if (w > 44 && h > 18 && barfont) {
+            char title[128];
+            get_window_title(n->win, title, sizeof title);
+            int len = (int)strlen(title);
+            while (len > 0 && textw(title) > w - 10) title[--len] = 0;
+            if (len > 0) {
+                /* legible title bar over the thumbnail */
+                XSetForeground(dpy, bargc, focused ? baraccentbg : barbg);
+                XFillRectangle(dpy, overview_pix, bargc, x + 1, y + 1, w - 2, 18);
+                XSetForeground(dpy, bargc, focused ? baraccentfg : barfg);
+                XDrawString(dpy, overview_pix, bargc, x + 5, y + 14, title, len);
+            }
+        }
+        return;
+    }
+    if (!has_tiled_leaf(n->a) && has_tiled_leaf(n->b)) {
+        overview_draw_node(n->b, x, y, w, h, foc, pic);
+        return;
+    }
+    if (!has_tiled_leaf(n->b) && has_tiled_leaf(n->a)) {
+        overview_draw_node(n->a, x, y, w, h, foc, pic);
+        return;
+    }
+    if (!has_tiled_leaf(n->a) && !has_tiled_leaf(n->b)) return;
+    if (n->horiz) {
+        int wa = (int)(w * n->ratio);
+        overview_draw_node(n->a, x, y, wa, h, foc, pic);
+        overview_draw_node(n->b, x + wa, y, w - wa, h, foc, pic);
+    } else {
+        int ha = (int)(h * n->ratio);
+        overview_draw_node(n->a, x, y, w, ha, foc, pic);
+        overview_draw_node(n->b, x, y + ha, w, h - ha, foc, pic);
+    }
+}
+
+static void overview_cell_rect(int ws, int *cx, int *cy, int *cw, int *ch) {
+    Mon *m = &mons[overview_mon];
+    int pad = 16;
+    int cellw = (m->w - pad * (OV_COLS + 1)) / OV_COLS;
+    int cellh = (m->h - pad * (OV_ROWS + 1)) / OV_ROWS;
+    *cx = pad + (ws % OV_COLS) * (cellw + pad);
+    *cy = pad + (ws / OV_COLS) * (cellh + pad);
+    *cw = cellw;
+    *ch = cellh;
+}
+
+static void draw_overview(void) {
+    Mon *m = &mons[overview_mon];
+    if (!overview_pix) return;
+
+    Picture pic = None;
+    if (composite_ok) {
+        int s = DefaultScreen(dpy);
+        pic = XRenderCreatePicture(dpy, overview_pix,
+            XRenderFindVisualFormat(dpy, DefaultVisual(dpy, s)), 0, NULL);
+    }
+
+    XSetForeground(dpy, bargc, barbg);
+    XFillRectangle(dpy, overview_pix, bargc, 0, 0, m->w, m->h);
+    for (int ws = 0; ws < MAXWS; ws++) {
+        int cx, cy, cw, ch;
+        overview_cell_rect(ws, &cx, &cy, &cw, &ch);
+        int sel = (ws == overview_sel);
+        int cur = (ws == m->curws);
+        XSetForeground(dpy, bargc, 0x1a1a1a);
+        XFillRectangle(dpy, overview_pix, bargc, cx, cy, cw, ch);
+
+        char lbl[8];
+        snprintf(lbl, sizeof lbl, "%d", ws + 1);
+        XSetForeground(dpy, bargc, cur ? baraccentbg : barmutedfg);
+        if (barfont) XDrawString(dpy, overview_pix, bargc, cx + 6, cy + 16, lbl, (int)strlen(lbl));
+
+        int ix = cx + 6, iy = cy + 24, iw = cw - 12, ih = ch - 30;
+        if (m->tree[ws]) overview_draw_node(m->tree[ws], ix, iy, iw, ih, m->focused[ws], pic);
+
+        unsigned long border = sel ? baraccentbg : (cur ? barfg : cnorm);
+        XSetForeground(dpy, bargc, border);
+        XDrawRectangle(dpy, overview_pix, bargc, cx, cy, cw - 1, ch - 1);
+        if (sel) XDrawRectangle(dpy, overview_pix, bargc, cx + 1, cy + 1, cw - 3, ch - 3);
+    }
+
+    /* ghost of the window being dragged, following the cursor */
+    if (ov_drag && ov_drag_node && ov_moved) {
+        int gw = 220, gh = 140;
+        int gx = ov_ptr_x - gw / 2, gy = ov_ptr_y - gh / 2;
+        if (pic && ov_drag_node->thumb)
+            render_scaled(pic, ov_drag_node->thumb, ov_drag_node->thumb_w,
+                          ov_drag_node->thumb_h, gx, gy, gw, gh);
+        else {
+            XSetForeground(dpy, bargc, baraccentbg);
+            XFillRectangle(dpy, overview_pix, bargc, gx, gy, gw, gh);
+        }
+        XSetForeground(dpy, bargc, baraccentbg);
+        XDrawRectangle(dpy, overview_pix, bargc, gx, gy, gw - 1, gh - 1);
+    }
+
+    if (pic != None) XRenderFreePicture(dpy, pic);
+    XCopyArea(dpy, overview_pix, overview_win, bargc, 0, 0, m->w, m->h, 0, 0);
+}
+
+static void open_overview(void) {
+    if (overview_active) return;
+    /* always open on the monitor under the pointer */
+    {
+        Window dw; int rx, ry, wx, wy; unsigned int msk;
+        if (XQueryPointer(dpy, root, &dw, &dw, &rx, &ry, &wx, &wy, &msk))
+            overview_mon = monforpt(rx, ry);
+        else
+            overview_mon = curmon;
+    }
+    overview_sel = mons[overview_mon].curws;
+    ov_drag = 0; ov_drag_node = NULL; ov_moved = 0;
+    Mon *m = &mons[overview_mon];
+    /* refresh thumbnails of every monitor's visible workspace */
+    if (composite_ok)
+        for (int mi = 0; mi < nmons; mi++)
+            capture_tree(mons[mi].tree[mons[mi].curws]);
+    XSetWindowAttributes wa;
+    wa.override_redirect = True;
+    wa.background_pixel = barbg;
+    wa.event_mask = ExposureMask | ButtonPressMask;
+    overview_win = XCreateWindow(dpy, root, m->x, m->y, m->w, m->h, 0,
+        CopyFromParent, InputOutput, CopyFromParent,
+        CWOverrideRedirect | CWBackPixel | CWEventMask, &wa);
+    overview_pix = XCreatePixmap(dpy, overview_win, m->w, m->h,
+        DefaultDepth(dpy, DefaultScreen(dpy)));
+    XMapRaised(dpy, overview_win);
+    XGrabKeyboard(dpy, root, True, GrabModeAsync, GrabModeAsync, CurrentTime);
+    /* actively grab the pointer so we receive motion + release for dragging */
+    XGrabPointer(dpy, overview_win, True,
+        ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
+        GrabModeAsync, GrabModeAsync, None, normalcursor, CurrentTime);
+    overview_active = 1;
+    draw_overview();
+}
+
+static void close_overview(void) {
+    if (!overview_active) return;
+    overview_active = 0;
+    ov_drag = 0; ov_drag_node = NULL; ov_moved = 0;
+    XUngrabPointer(dpy, CurrentTime);
+    XUngrabKeyboard(dpy, CurrentTime);
+    if (overview_pix) { XFreePixmap(dpy, overview_pix); overview_pix = 0; }
+    if (overview_win) { XDestroyWindow(dpy, overview_win); overview_win = 0; }
+    /* restore the normal/command-mode keyboard grab if the WM held one */
+    if (keyboard_grabbed)
+        XGrabKeyboard(dpy, root, True, GrabModeAsync, GrabModeAsync, CurrentTime);
+    if (mon_focused(curmon)) setfocus(curmon, mon_focused(curmon), 0);
+}
+
+static void overview_choose(int ws) {
+    int mi = overview_mon;
+    close_overview();
+    switch_workspace_on(mi, ws);
+}
+
+static void overview_key(KeySym sym) {
+    switch (sym) {
+    case XK_Escape:
+    case XK_q:
+    case XK_z:
+        close_overview();
+        return;
+    case XK_Return:
+    case XK_KP_Enter:
+    case XK_space:
+        overview_choose(overview_sel);
+        return;
+    case XK_Left:
+    case XK_h:
+        if (overview_sel % OV_COLS) { overview_sel--; draw_overview(); }
+        return;
+    case XK_Right:
+    case XK_l:
+        if (overview_sel % OV_COLS != OV_COLS - 1 && overview_sel + 1 < MAXWS) {
+            overview_sel++; draw_overview();
+        }
+        return;
+    case XK_Up:
+    case XK_k:
+        if (overview_sel >= OV_COLS) { overview_sel -= OV_COLS; draw_overview(); }
+        return;
+    case XK_Down:
+    case XK_j:
+        if (overview_sel + OV_COLS < MAXWS) { overview_sel += OV_COLS; draw_overview(); }
+        return;
+    default:
+        if (sym >= XK_1 && sym <= XK_9) overview_choose((int)(sym - XK_1));
+        return;
+    }
+}
+
+/* which leaf, if any, sits under (px,py) — mirrors overview_draw_node layout */
+static Node *overview_node_at(Node *n, int x, int y, int w, int h,
+                             int px, int py) {
+    if (!n || w < 2 || h < 2) return NULL;
+    if (n->leaf) {
+        if (px >= x && px < x + w && py >= y && py < y + h) return n;
+        return NULL;
+    }
+    if (!has_tiled_leaf(n->a) && has_tiled_leaf(n->b))
+        return overview_node_at(n->b, x, y, w, h, px, py);
+    if (!has_tiled_leaf(n->b) && has_tiled_leaf(n->a))
+        return overview_node_at(n->a, x, y, w, h, px, py);
+    if (!has_tiled_leaf(n->a) && !has_tiled_leaf(n->b)) return NULL;
+    if (n->horiz) {
+        int wa = (int)(w * n->ratio);
+        Node *r = overview_node_at(n->a, x, y, wa, h, px, py);
+        return r ? r : overview_node_at(n->b, x + wa, y, w - wa, h, px, py);
+    }
+    int ha = (int)(h * n->ratio);
+    Node *r = overview_node_at(n->a, x, y, w, ha, px, py);
+    return r ? r : overview_node_at(n->b, x, y + ha, w, h - ha, px, py);
+}
+
+/* resolve a root-coordinate point to a workspace cell and (optionally) a leaf */
+static Node *overview_pick(int rx, int ry, int *out_ws) {
+    Mon *m = &mons[overview_mon];
+    int lx = rx - m->x, ly = ry - m->y;
+    if (out_ws) *out_ws = -1;
+    for (int ws = 0; ws < MAXWS; ws++) {
+        int cx, cy, cw, ch;
+        overview_cell_rect(ws, &cx, &cy, &cw, &ch);
+        if (lx >= cx && lx < cx + cw && ly >= cy && ly < cy + ch) {
+            if (out_ws) *out_ws = ws;
+            int ix = cx + 6, iy = cy + 24, iw = cw - 12, ih = ch - 30;
+            return overview_node_at(m->tree[ws], ix, iy, iw, ih, lx, ly);
+        }
+    }
+    return NULL;
+}
+
+static void overview_press(int rx, int ry) {
+    int ws;
+    Node *leaf = overview_pick(rx, ry, &ws);
+    ov_drag = (ws >= 0);
+    ov_drag_node = leaf;
+    ov_drag_ws = ws;
+    ov_press_rx = rx;
+    ov_press_ry = ry;
+    ov_ptr_x = rx - mons[overview_mon].x;
+    ov_ptr_y = ry - mons[overview_mon].y;
+    ov_moved = 0;
+    if (ws >= 0 && ws != overview_sel) { overview_sel = ws; draw_overview(); }
+}
+
+static void overview_motion(int rx, int ry) {
+    if (!ov_drag) return;
+    ov_ptr_x = rx - mons[overview_mon].x;
+    ov_ptr_y = ry - mons[overview_mon].y;
+    if (!ov_moved) {
+        int dx = rx - ov_press_rx, dy = ry - ov_press_ry;
+        if (dx * dx + dy * dy > 36) ov_moved = 1;   /* >6px = a drag */
+    }
+    if (ov_moved) draw_overview();
+}
+
+/* move a leaf to another workspace on the overview's monitor */
+static void overview_move_leaf(Node *leaf, int srcws, int dstws) {
+    int mi = overview_mon;
+    detach_from_ws(mi, srcws, leaf);
+    attach_to_ws(mi, dstws, leaf);
+    if (dstws == mons[mi].curws) showtree(leaf);   /* now visible */
+    else hidetree(leaf);                            /* now hidden  */
+    retile();
+}
+
+static void overview_release(int rx, int ry) {
+    if (!ov_drag) return;
+    int was_drag = ov_moved;
+    Node *node = ov_drag_node;
+    int srcws = ov_drag_ws;
+    ov_drag = 0; ov_drag_node = NULL; ov_moved = 0;
+
+    if (!was_drag) {
+        /* a plain click enters the workspace under the pointer */
+        int ws; overview_pick(rx, ry, &ws);
+        if (ws >= 0) overview_choose(ws);
+        return;
+    }
+    if (!node) { draw_overview(); return; }
+
+    int dstws;
+    Node *target = overview_pick(rx, ry, &dstws);
+    if (dstws < 0 || dstws == srcws) {
+        if (target && target != node && dstws == srcws)
+            swap_leaf_payload(node, target);   /* reorder within a workspace */
+        retile();
+        draw_overview();
+        return;
+    }
+    overview_move_leaf(node, srcws, dstws);
+    draw_overview();
+}
+
+static void toggle_overview(void) {
+    if (overview_active) close_overview();
+    else open_overview();
 }
 
 static void screenshot(void) {
@@ -1937,6 +2499,7 @@ static void apply_screen_off_config(void) {
 }
 
 static void reloadwm(void) {
+    if (overview_active) close_overview();
     XUngrabKey(dpy, AnyKey, AnyModifier, root);
     loadcfg();
     apply_screen_off_config();
@@ -1992,7 +2555,7 @@ static void sync_window_fullscreen(Window win) {
     if (wants) {
         n->fullscreen = 0;
         n->floating = 0;
-        if (ws == curws) setfocus(mi, n, 0);
+        if (ws == mons[mi].curws) setfocus(mi, n, 0);
     }
     retile();
 }
@@ -2114,16 +2677,20 @@ static int apply_wm_action(const char *action) {
         if (n) setfocus(curmon, n, 1);
         return 1;
     }
+    if (!strcmp(action, "wm:overview")) {
+        toggle_overview();
+        return 1;
+    }
     if (!strncmp(action, "wm:workspace:", 13)) {
         switch_workspace(atoi(action + 13) - 1);
         return 1;
     }
     if (!strcmp(action, "wm:workspace_prev")) {
-        switch_workspace((curws + MAXWS - 1) % MAXWS);
+        switch_workspace((mons[curmon].curws + MAXWS - 1) % MAXWS);
         return 1;
     }
     if (!strcmp(action, "wm:workspace_next")) {
-        switch_workspace((curws + 1) % MAXWS);
+        switch_workspace((mons[curmon].curws + 1) % MAXWS);
         return 1;
     }
     if (!strncmp(action, "wm:move_to_workspace:", 21)) {
@@ -2135,11 +2702,11 @@ static int apply_wm_action(const char *action) {
         return 1;
     }
     if (!strcmp(action, "wm:move_to_workspace_prev")) {
-        move_focused_to_workspace_and_follow((curws + MAXWS - 1) % MAXWS);
+        move_focused_to_workspace_and_follow((mons[curmon].curws + MAXWS - 1) % MAXWS);
         return 1;
     }
     if (!strcmp(action, "wm:move_to_workspace_next")) {
-        move_focused_to_workspace_and_follow((curws + 1) % MAXWS);
+        move_focused_to_workspace_and_follow((mons[curmon].curws + 1) % MAXWS);
         return 1;
     }
     if (!strcmp(action, "wm:toggle_float_centered")) {
@@ -2424,6 +2991,7 @@ int main(void) {
     movecursor = XCreateFontCursor(dpy, XC_fleur);
     resizecursor = XCreateFontCursor(dpy, XC_bottom_right_corner);
     XDefineCursor(dpy, root, normalcursor);
+    init_composite();
     initatoms();
     setup_wm_check();
     update_supported_atoms();
@@ -2431,24 +2999,13 @@ int main(void) {
     update_current_desktop();
     update_active_window();
 
-    int xiev, xierr;
-    if (XineramaQueryExtension(dpy, &xiev, &xierr) && XineramaIsActive(dpy)) {
-        int n;
-        XineramaScreenInfo *xi = XineramaQueryScreens(dpy, &n);
-        nmons = n < MAXMONS ? n : MAXMONS;
-        for (int i = 0; i < nmons; i++) {
-            mons[i].x = xi[i].x_org;
-            mons[i].y = xi[i].y_org;
-            mons[i].w = xi[i].width;
-            mons[i].h = xi[i].height;
-        }
-        XFree(xi);
-    } else {
-        nmons = 1;
-        mons[0].x = 0;
-        mons[0].y = 0;
-        mons[0].w = sw;
-        mons[0].h = sh;
+    nmons = querygeom(mons, MAXMONS);
+
+    /* RandR: listen for monitor hotplug / resolution changes */
+    int rrerr;
+    if (XRRQueryExtension(dpy, &randr_event_base, &rrerr)) {
+        randr_active = 1;
+        XRRSelectInput(dpy, root, RRScreenChangeNotifyMask);
     }
 
     XSelectInput(dpy, root, SubstructureNotifyMask | SubstructureRedirectMask | KeyPressMask);
@@ -2487,9 +3044,22 @@ int main(void) {
         while (XPending(dpy)) {
             XEvent ev;
             XNextEvent(dpy, &ev);
+            if (randr_active && ev.type == randr_event_base + RRScreenChangeNotify) {
+                XRRUpdateConfiguration(&ev);
+                if (updategeom()) {
+                    setupbars();
+                    retile();
+                    if (mon_focused(curmon)) setfocus(curmon, mon_focused(curmon), 0);
+                }
+                continue;
+            }
             switch (ev.type) {
         case Expose:
             if (ev.xexpose.count != 0) break;
+            if (overview_active && ev.xexpose.window == overview_win) {
+                draw_overview();
+                break;
+            }
             for (int i = 0; i < nmons; i++) {
                 if (ev.xexpose.window == mons[i].barwin) {
                     drawbar(i);
@@ -2513,16 +3083,16 @@ int main(void) {
                 int rx, ry, wx, wy;
                 unsigned msk;
                 Node *n;
-                int targetws = curws;
                 int existing_mi = 0, existing_ws = 0;
                 Node *existing = findleaf_any(ev.xmaprequest.window, &existing_mi, &existing_ws);
                 if (existing) {
                     retile();
-                    if (existing_ws == curws) setfocus(existing_mi, existing, 1);
+                    if (existing_ws == mons[existing_mi].curws) setfocus(existing_mi, existing, 1);
                     break;
                 }
                 XQueryPointer(dpy, root, &dw, &dw, &rx, &ry, &wx, &wy, &msk);
                 int mi = monforpt(rx, ry);
+                int targetws = mons[mi].curws;
                 n = mkleaf(ev.xmaprequest.window);
                 int follow = 0;
                 apply_rules(n, &targetws, &follow);
@@ -2531,9 +3101,9 @@ int main(void) {
                     n->real_fullscreen = 1;
                 }
                 attach_to_ws(mi, targetws, n);
-                if (targetws != curws) {
+                if (targetws != mons[mi].curws) {
                     if (follow) {
-                        switch_workspace(targetws);
+                        switch_workspace_on(mi, targetws);
                     } else {
                         unmap_managed(n);
                         retile();
@@ -2624,7 +3194,7 @@ int main(void) {
                 int mi = 0, ws = 0;
                 Node *n = findleaf_any(ev.xclient.window, &mi, &ws);
                 if (n) {
-                    if (ws != curws) switch_workspace(ws);
+                    if (ws != mons[mi].curws) switch_workspace_on(mi, ws);
                     setfocus(mi, n, 1);
                 }
                 break;
@@ -2639,7 +3209,7 @@ int main(void) {
         case ConfigureRequest: {
             int mi = 0, ws = 0;
             Node *n = findleaf_any(ev.xconfigurerequest.window, &mi, &ws);
-            if (n && ws == curws && !n->floating && !n->fullscreen && !n->real_fullscreen) {
+            if (n && ws == mons[mi].curws && !n->floating && !n->fullscreen && !n->real_fullscreen) {
                 retile();
                 break;
             }
@@ -2671,16 +3241,25 @@ int main(void) {
             break;
 
         case ButtonPress: {
+            if (overview_active) {
+                if (ev.xbutton.button == Button1)
+                    overview_press(ev.xbutton.x_root, ev.xbutton.y_root);
+                else
+                    close_overview();
+                break;
+            }
             if (ev.xbutton.button == Button4 || ev.xbutton.button == Button5) {
                 unsigned int st = ev.xbutton.state &
                     (ShiftMask | ControlMask | Mod1Mask | Mod4Mask | LockMask | numlockmask);
                 st &= ~(LockMask | numlockmask);
-                /* wheel up = next workspace, wheel down = previous */
+                /* wheel up = next workspace, wheel down = previous;
+                   acts on the monitor under the pointer */
+                int pmi = monforpt(ev.xbutton.x_root, ev.xbutton.y_root);
                 int next = (ev.xbutton.button == Button4);
-                int targetws = next ? (curws + 1) % MAXWS
-                                    : (curws + MAXWS - 1) % MAXWS;
+                int targetws = next ? (mons[pmi].curws + 1) % MAXWS
+                                    : (mons[pmi].curws + MAXWS - 1) % MAXWS;
                 if (st == MOD)
-                    switch_workspace(targetws);
+                    switch_workspace_on(pmi, targetws);
                 else if (st == (MOD | ControlMask))
                     move_focused_to_workspace_and_follow(targetws);
                 break;
@@ -2734,6 +3313,11 @@ int main(void) {
         }
 
         case ButtonRelease:
+            if (overview_active) {
+                if (ev.xbutton.button == Button1)
+                    overview_release(ev.xbutton.x_root, ev.xbutton.y_root);
+                break;
+            }
             if (drag_mode) {
                 XUngrabPointer(dpy, CurrentTime);
                 if (drag_node) {
@@ -2758,11 +3342,15 @@ int main(void) {
             break;
 
         case MotionNotify:
-            if (!drag_mode || !drag_node) break;
             {
                 XEvent newer;
                 while (XCheckTypedEvent(dpy, MotionNotify, &newer)) ev = newer;
             }
+            if (overview_active) {
+                overview_motion(ev.xmotion.x_root, ev.xmotion.y_root);
+                break;
+            }
+            if (!drag_mode || !drag_node) break;
             {
                 int dx = ev.xmotion.x_root - drag_ox;
                 int dy = ev.xmotion.y_root - drag_oy;
@@ -2809,6 +3397,11 @@ int main(void) {
             state &= ~(LockMask | numlockmask);
             KeySym sym = XLookupKeysym(&ev.xkey, 0);
 
+            if (overview_active) {
+                overview_key(sym);
+                break;
+            }
+
             if (state == (ControlMask | Mod4Mask) && (sym == XK_Left || sym == XK_KP_Left)) {
                 apply_wm_action("wm:swap_left");
                 break;
@@ -2854,6 +3447,13 @@ int main(void) {
                 }
             }
             if (handled) break;
+
+            /* built-in fallback so Super+Z opens the overview even without a
+               config bind; a user bind for this key takes priority above */
+            if (state == MOD && (sym == XK_z || sym == XK_Z)) {
+                apply_wm_action("wm:overview");
+                break;
+            }
 
             if (mode == MODE_COMMAND) {
                 handle_command_key(&ev.xkey, sym);

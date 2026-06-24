@@ -22,12 +22,12 @@
 #include <unistd.h>
 
 #define MOD          Mod4Mask
-#define MAXBINDS     64
+#define MAXBINDS     128
 #define MAXMODEBINDS 24
 #define MAXCMDS      16
 #define MAXRULES     32
 #define MAXMONS       8
-#define MAXWS         9
+#define MAXWS         500   /* hard cap (array size); active count is numws */
 #define MAXAUTOSTART 8
 #define MAXDOCKS     16
 #define CMDLINE_MAX 256
@@ -92,6 +92,7 @@ typedef enum {
     MODE_COMMAND
 } InputMode;
 
+static int numws = 9;   /* active workspaces, configurable: 1..MAXWS */
 static int gap = 8, bw = 2, barh = 24, barenabled = 1, externalbarh = 0;
 static int barpadx = 10, baritemgap = 6, bartextpad = 8, barwsminw = 20;
 static unsigned long cfocus = 0x5588ff, cnorm = 0x333333;
@@ -638,7 +639,7 @@ static Node *findleaf(Node *n, Window w) {
 
 static Node *findleaf_any(Window w, int *out_mi, int *out_ws) {
     for (int mi = 0; mi < nmons; mi++) {
-        for (int ws = 0; ws < MAXWS; ws++) {
+        for (int ws = 0; ws < numws; ws++) {
             Node *n = findleaf(mon_tree_at(mi, ws), w);
             if (n) {
                 if (out_mi) *out_mi = mi;
@@ -754,9 +755,21 @@ static void init_composite(void) {
     /* XCompositeNameWindowPixmap needs >= 0.2 */
     if (maj == 0 && min < 2) return;
     if (!XRenderQueryExtension(dpy, &evb, &erb)) return;
-    /* Automatic: the server keeps painting windows normally on screen, we
-       just gain access to their off-screen pixmaps for the overview */
-    XCompositeRedirectSubwindows(dpy, root, CompositeRedirectAutomatic);
+    /* If an external compositor (picom/compton) is already running it has
+       redirected the root's subwindows in Manual mode and owns presentation.
+       Requesting our own redirect on top of that fights its reference count
+       and breaks its animations / wallpaper. Detect it via the standard
+       _NET_WM_CM_S<screen> selection owner: when present, skip the redirect
+       entirely -- windows are already redirected, so XCompositeNameWindowPixmap
+       still gives us their off-screen pixmaps for the overview. */
+    char cmsel[32];
+    snprintf(cmsel, sizeof cmsel, "_NET_WM_CM_S%d", DefaultScreen(dpy));
+    Atom cm = XInternAtom(dpy, cmsel, False);
+    if (XGetSelectionOwner(dpy, cm) == None) {
+        /* No compositor: take over redirection ourselves. Automatic keeps the
+           server painting windows normally; we just read their pixmaps. */
+        XCompositeRedirectSubwindows(dpy, root, CompositeRedirectAutomatic);
+    }
     composite_ok = 1;
 }
 
@@ -981,7 +994,7 @@ static int mon_ws_visible_in_bar(int mi, int ws) {
 
 static int workspace_section_width(void) {
     int width = 0;
-    for (int i = 0; i < MAXWS; i++) {
+    for (int i = 0; i < numws; i++) {
         char part[8];
         if (!mon_ws_visible_in_bar(barmon, i)) continue;
         snprintf(part, sizeof part, "%d", i + 1);
@@ -992,7 +1005,7 @@ static int workspace_section_width(void) {
 
 static int draw_workspace_section(Window win, int x, int y) {
     int curx = x;
-    for (int i = 0; i < MAXWS; i++) {
+    for (int i = 0; i < numws; i++) {
         char part[8];
         unsigned long bg = barbg, fg = barmutedfg;
         if (!mon_ws_visible_in_bar(barmon, i)) continue;
@@ -1285,7 +1298,7 @@ static int updategeom(void) {
     if (nn < nmons) {
         int target = nn - 1;
         for (int mi = nn; mi < nmons; mi++) {
-            for (int ws = 0; ws < MAXWS; ws++) {
+            for (int ws = 0; ws < numws; ws++) {
                 Node *tree = mons[mi].tree[ws];
                 if (!tree) continue;
                 Node *leaves[256];
@@ -1303,7 +1316,7 @@ static int updategeom(void) {
             }
         }
         /* hide windows migrated onto a non-current workspace of the target */
-        for (int ws = 0; ws < MAXWS; ws++)
+        for (int ws = 0; ws < numws; ws++)
             if (ws != mons[target].curws) hidetree(mons[target].tree[ws]);
     }
 
@@ -1393,7 +1406,7 @@ static void update_client_list(void) {
     Window list[1024];
     int count = 0;
     for (int mi = 0; mi < nmons; mi++) {
-        for (int ws = 0; ws < MAXWS; ws++) {
+        for (int ws = 0; ws < numws; ws++) {
             collect_client_windows(mon_tree_at(mi, ws), list, &count, 1024);
         }
     }
@@ -1408,7 +1421,7 @@ static void update_current_desktop(void) {
 }
 
 static void update_number_of_desktops(void) {
-    unsigned long n = MAXWS;
+    unsigned long n = numws;
     XChangeProperty(dpy, root, atom_net_number_of_desktops, XA_CARDINAL, 32, PropModeReplace,
         (unsigned char *)&n, 1);
 }
@@ -1451,7 +1464,7 @@ static void apply_rules(Node *n, int *targetws, int *out_follow) {
     /* follow_class: if no explicit workspace rule fired, find existing window
        of same class on another workspace and follow it */
     if (want_follow && targetws && *targetws == base_ws && class_name[0]) {
-        for (int ws = 0; ws < MAXWS; ws++) {
+        for (int ws = 0; ws < numws; ws++) {
             if (ws == base_ws) continue;
             int found = 0;
             for (int mi = 0; mi < nmons && !found; mi++) {
@@ -1485,7 +1498,7 @@ static void hidetree(Node *n) {
 
 /* switch only monitor mi to workspace ws; other monitors keep their own */
 static void switch_workspace_on(int mi, int ws) {
-    if (mi < 0 || mi >= nmons || ws < 0 || ws >= MAXWS || ws == mons[mi].curws) return;
+    if (mi < 0 || mi >= nmons || ws < 0 || ws >= numws || ws == mons[mi].curws) return;
     /* snapshot the windows we are about to hide so the overview can still
        show their contents while they are unmapped */
     if (composite_ok) capture_tree(mons[mi].tree[mons[mi].curws]);
@@ -1609,15 +1622,42 @@ static int interval_overlap(int a1, int a2, int b1, int b2) {
     return hi > lo ? hi - lo : 0;
 }
 
-static Node *find_directional_focus(int mi, Node *from, const char *dir) {
-    Node *nodes[256];
-    int count = 0;
-    Node *best = NULL;
-    long bestscore = 0;
+/* direction codes, used by the pure picker below */
+enum { DIR_LEFT = 0, DIR_RIGHT, DIR_UP, DIR_DOWN };
+
+static int dir_code(const char *dir) {
+    if (!strcmp(dir, "left")) return DIR_LEFT;
+    if (!strcmp(dir, "right")) return DIR_RIGHT;
+    if (!strcmp(dir, "up")) return DIR_UP;
+    return DIR_DOWN;
+}
+
+/* === PURE directional picker (no globals, unit-tested in tests/dirtest.c) ===
+   Given the tiled leaf rectangles in `leaves`, return the window that lives
+   immediately in direction `d` of `from`, the way Hyprland's `movefocus`
+   does it:
+
+     - only windows that are actually in that direction are considered
+       (`primary >= 0`: their near edge is at or past our facing edge; tiled
+       neighbours share an edge exactly, so primary == 0 must be accepted);
+     - among those, the nearest one wins (`primary` dominates the score);
+     - ties are broken by the smaller perpendicular-centre offset, so we pick
+       the window we are visually lined up with;
+     - a window that overlaps us on the perpendicular axis (a true
+       side-by-side neighbour) always beats a merely diagonal one, regardless
+       of distance — that is what makes "go left" feel like Hyprland and never
+       jump to a diagonally-touching tile.
+
+   Returns NULL when there is nothing in that direction.
+   IMPORTANT: keep this function byte-for-byte in sync with the copy in
+   tests/dirtest.c (the test compiles its own copy and asserts behaviour). */
+static Node *pick_directional(Node **leaves, int count, Node *from, int d) {
+    Node *best = NULL;     /* nearest with perpendicular overlap */
+    Node *fallback = NULL; /* nearest of any, even diagonal */
+    long bestscore = 0, fbscore = 0;
     int fx1, fy1, fx2, fy2, fcx, fcy;
 
     if (!from) return NULL;
-    collect_leaves(mon_tree(mi), nodes, &count, 256);
     fx1 = from->x;
     fy1 = from->y;
     fx2 = from->x + from->w;
@@ -1626,11 +1666,11 @@ static Node *find_directional_focus(int mi, Node *from, const char *dir) {
     fcy = from->y + from->h / 2;
 
     for (int i = 0; i < count; i++) {
-        Node *n = nodes[i];
+        Node *n = leaves[i];
         int nx1, ny1, nx2, ny2, ncx, ncy;
         int primary, secondary, overlap;
         long score;
-        if (n == from) continue;
+        if (n == from || n->floating) continue;
         nx1 = n->x;
         ny1 = n->y;
         nx2 = n->x + n->w;
@@ -1638,15 +1678,15 @@ static Node *find_directional_focus(int mi, Node *from, const char *dir) {
         ncx = n->x + n->w / 2;
         ncy = n->y + n->h / 2;
 
-        if (!strcmp(dir, "left")) {
+        if (d == DIR_LEFT) {
             primary = fx1 - nx2;
             overlap = interval_overlap(fy1, fy2, ny1, ny2);
             secondary = abs(fcy - ncy);
-        } else if (!strcmp(dir, "right")) {
+        } else if (d == DIR_RIGHT) {
             primary = nx1 - fx2;
             overlap = interval_overlap(fy1, fy2, ny1, ny2);
             secondary = abs(fcy - ncy);
-        } else if (!strcmp(dir, "up")) {
+        } else if (d == DIR_UP) {
             primary = fy1 - ny2;
             overlap = interval_overlap(fx1, fx2, nx1, nx2);
             secondary = abs(fcx - ncx);
@@ -1656,18 +1696,22 @@ static Node *find_directional_focus(int mi, Node *from, const char *dir) {
             secondary = abs(fcx - ncx);
         }
 
-        if (primary <= 0) continue;
-        score = (long)primary * 100000L + (long)(secondary - overlap) * 100L + secondary;
-        if (!best || score < bestscore) {
-            best = n;
-            bestscore = score;
+        if (primary < 0) continue;
+        score = (long)primary * 100000L + (long)secondary;
+        if (overlap > 0) {
+            if (!best || score < bestscore) { best = n; bestscore = score; }
         }
+        if (!fallback || score < fbscore) { fallback = n; fbscore = score; }
     }
-    if (!best) {
-        if (!strcmp(dir, "left") || !strcmp(dir, "up")) return prevleaf(mi, from);
-        return nextleaf(mi, from);
-    }
-    return best;
+    return best ? best : fallback;
+}
+
+static Node *find_directional_focus(int mi, Node *from, const char *dir) {
+    Node *nodes[256];
+    int count = 0;
+    if (!from) return NULL;
+    collect_leaves(mon_tree(mi), nodes, &count, 256);
+    return pick_directional(nodes, count, from, dir_code(dir));
 }
 
 static int swap_in_direction(const char *dir) {
@@ -1688,7 +1732,7 @@ static void move_focused_to_workspace(int targetws) {
     Node *n;
     int srcmon = curmon;
     int srcws = mons[srcmon].curws;
-    if (targetws < 0 || targetws >= MAXWS || targetws == srcws) return;
+    if (targetws < 0 || targetws >= numws || targetws == srcws) return;
     n = mon_focused(srcmon);
     if (!n) return;
     detach_from_ws(srcmon, srcws, n);
@@ -1699,15 +1743,23 @@ static void move_focused_to_workspace(int targetws) {
 }
 
 static void move_focused_to_workspace_and_follow(int targetws) {
-    if (targetws < 0 || targetws >= MAXWS || targetws == mons[curmon].curws) return;
+    if (targetws < 0 || targetws >= numws || targetws == mons[curmon].curws) return;
     move_focused_to_workspace(targetws);
     switch_workspace(targetws);
 }
 
 /* ---- workspace overview (Super+Z), niri-style schematic ---- */
 
-#define OV_COLS 3
-#define OV_ROWS 3
+/* grid adapts to the active workspace count: a near-square layout */
+static int ov_cols(void) {
+    int c = 1;
+    while (c * c < numws) c++;
+    return c;
+}
+static int ov_rows(void) {
+    int c = ov_cols();
+    return (numws + c - 1) / c;
+}
 
 /* mirror of tilenode's split math, drawing scaled boxes instead of moving
    real windows; used to render a miniature of a workspace in the overview */
@@ -1764,11 +1816,12 @@ static void overview_draw_node(Node *n, int x, int y, int w, int h, Node *foc,
 
 static void overview_cell_rect(int ws, int *cx, int *cy, int *cw, int *ch) {
     Mon *m = &mons[overview_mon];
+    int cols = ov_cols(), rows = ov_rows();
     int pad = 16;
-    int cellw = (m->w - pad * (OV_COLS + 1)) / OV_COLS;
-    int cellh = (m->h - pad * (OV_ROWS + 1)) / OV_ROWS;
-    *cx = pad + (ws % OV_COLS) * (cellw + pad);
-    *cy = pad + (ws / OV_COLS) * (cellh + pad);
+    int cellw = (m->w - pad * (cols + 1)) / cols;
+    int cellh = (m->h - pad * (rows + 1)) / rows;
+    *cx = pad + (ws % cols) * (cellw + pad);
+    *cy = pad + (ws / cols) * (cellh + pad);
     *cw = cellw;
     *ch = cellh;
 }
@@ -1786,7 +1839,7 @@ static void draw_overview(void) {
 
     XSetForeground(dpy, bargc, barbg);
     XFillRectangle(dpy, overview_pix, bargc, 0, 0, m->w, m->h);
-    for (int ws = 0; ws < MAXWS; ws++) {
+    for (int ws = 0; ws < numws; ws++) {
         int cx, cy, cw, ch;
         overview_cell_rect(ws, &cx, &cy, &cw, &ch);
         int sel = (ws == overview_sel);
@@ -1897,21 +1950,21 @@ static void overview_key(KeySym sym) {
         return;
     case XK_Left:
     case XK_h:
-        if (overview_sel % OV_COLS) { overview_sel--; draw_overview(); }
+        if (overview_sel % ov_cols()) { overview_sel--; draw_overview(); }
         return;
     case XK_Right:
     case XK_l:
-        if (overview_sel % OV_COLS != OV_COLS - 1 && overview_sel + 1 < MAXWS) {
+        if (overview_sel % ov_cols() != ov_cols() - 1 && overview_sel + 1 < numws) {
             overview_sel++; draw_overview();
         }
         return;
     case XK_Up:
     case XK_k:
-        if (overview_sel >= OV_COLS) { overview_sel -= OV_COLS; draw_overview(); }
+        if (overview_sel >= ov_cols()) { overview_sel -= ov_cols(); draw_overview(); }
         return;
     case XK_Down:
     case XK_j:
-        if (overview_sel + OV_COLS < MAXWS) { overview_sel += OV_COLS; draw_overview(); }
+        if (overview_sel + ov_cols() < numws) { overview_sel += ov_cols(); draw_overview(); }
         return;
     default:
         if (sym >= XK_1 && sym <= XK_9) overview_choose((int)(sym - XK_1));
@@ -1947,7 +2000,7 @@ static Node *overview_pick(int rx, int ry, int *out_ws) {
     Mon *m = &mons[overview_mon];
     int lx = rx - m->x, ly = ry - m->y;
     if (out_ws) *out_ws = -1;
-    for (int ws = 0; ws < MAXWS; ws++) {
+    for (int ws = 0; ws < numws; ws++) {
         int cx, cy, cw, ch;
         overview_cell_rect(ws, &cx, &cy, &cw, &ch);
         if (lx >= cx && lx < cx + cw && ly >= cy && ly < cy + ch) {
@@ -2382,7 +2435,7 @@ static int parse_rule_config(const char *line) {
             r->follow_class = 1;
         } else if (!strncasecmp(act, "workspace:", 10)) {
             int ws = atoi(act + 10);
-            if (ws >= 1 && ws <= MAXWS) r->workspace = ws - 1;
+            if (ws >= 1 && ws <= numws) r->workspace = ws - 1;
         }
     }
     nrules++;
@@ -2411,6 +2464,7 @@ static int apply_limit_config(const char *k, const char *v) {
 
 static int apply_scalar_config(const char *k, const char *v) {
     if (!strcmp(k, "gap")) gap = atoi(v);
+    else if (!strcmp(k, "workspaces")) numws = clampi(atoi(v), 1, MAXWS);
     else if (!strcmp(k, "border")) bw = atoi(v);
     else if (!strcmp(k, "bar_height")) barh = clampi(atoi(v), 0, 256);
     else if (!strcmp(k, "bar_enabled")) barenabled = parse_bool_value(v, barenabled);
@@ -2526,10 +2580,33 @@ static void apply_screen_off_config(void) {
     spawn(cmd);
 }
 
+/* argv as received by main(); used to re-exec ourselves on wm:restart so a
+   freshly-installed binary can be loaded without ending the X session. */
+static char **wm_argv = NULL;
+
+static void restartwm(void) {
+    if (!wm_argv || !wm_argv[0]) return;
+    /* drop our grabs/state so the new instance starts clean, then re-exec.
+       argv[0] is normally "nvwm", so execvp resolves it via PATH to the
+       currently-installed binary. */
+    XUngrabKey(dpy, AnyKey, AnyModifier, root);
+    XSync(dpy, False);
+    if (dpy) XCloseDisplay(dpy);
+    execvp(wm_argv[0], wm_argv);
+    /* if exec failed, there is nothing sane left to do */
+    _exit(1);
+}
+
 static void reloadwm(void) {
     if (overview_active) close_overview();
     XUngrabKey(dpy, AnyKey, AnyModifier, root);
     loadcfg();
+    /* if a reload lowered the workspace count, keep each monitor on a valid
+       one (windows on now-hidden workspaces stay attached, reachable again
+       if the count is raised back) */
+    for (int mi = 0; mi < nmons; mi++)
+        if (mons[mi].curws >= numws) mons[mi].curws = numws - 1;
+    update_number_of_desktops();
     apply_screen_off_config();
     updatenumlockmask();
     grab_mod_binds();
@@ -2649,6 +2726,10 @@ static int apply_wm_action(const char *action) {
         reloadwm();
         return 1;
     }
+    if (!strcmp(action, "wm:restart")) {
+        restartwm();
+        return 1;
+    }
     if (!strcmp(action, "wm:focus_next")) {
         Node *n = nextleaf(curmon, mon_focused(curmon));
         if (n && n != mon_focused(curmon)) setfocus(curmon, n, 1);
@@ -2715,12 +2796,12 @@ static int apply_wm_action(const char *action) {
     }
     if (!strcmp(action, "wm:workspace_prev")) {
         int mi = pointer_mon();
-        switch_workspace((mons[mi].curws + MAXWS - 1) % MAXWS);
+        switch_workspace((mons[mi].curws + numws - 1) % numws);
         return 1;
     }
     if (!strcmp(action, "wm:workspace_next")) {
         int mi = pointer_mon();
-        switch_workspace((mons[mi].curws + 1) % MAXWS);
+        switch_workspace((mons[mi].curws + 1) % numws);
         return 1;
     }
     if (!strncmp(action, "wm:move_to_workspace:", 21)) {
@@ -2732,11 +2813,11 @@ static int apply_wm_action(const char *action) {
         return 1;
     }
     if (!strcmp(action, "wm:move_to_workspace_prev")) {
-        move_focused_to_workspace_and_follow((mons[curmon].curws + MAXWS - 1) % MAXWS);
+        move_focused_to_workspace_and_follow((mons[curmon].curws + numws - 1) % numws);
         return 1;
     }
     if (!strcmp(action, "wm:move_to_workspace_next")) {
-        move_focused_to_workspace_and_follow((mons[curmon].curws + 1) % MAXWS);
+        move_focused_to_workspace_and_follow((mons[curmon].curws + 1) % numws);
         return 1;
     }
     if (!strcmp(action, "wm:toggle_float_centered")) {
@@ -3020,7 +3101,9 @@ static void setupbars(void) {
     if (barenabled) drawbars();
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    (void)argc;
+    wm_argv = argv;
     signal(SIGCHLD, SIG_IGN);
     dpy = XOpenDisplay(NULL);
     if (!dpy) return 1;
@@ -3054,6 +3137,7 @@ int main(void) {
     XSelectInput(dpy, root, SubstructureNotifyMask | SubstructureRedirectMask | KeyPressMask);
 
     loadcfg();
+    update_number_of_desktops();   /* numws is now known from config */
     apply_screen_off_config();
     updatenumlockmask();
     grab_mod_binds();
@@ -3299,8 +3383,8 @@ int main(void) {
                    acts on the monitor under the pointer */
                 int pmi = monforpt(ev.xbutton.x_root, ev.xbutton.y_root);
                 int next = (ev.xbutton.button == Button4);
-                int targetws = next ? (mons[pmi].curws + 1) % MAXWS
-                                    : (mons[pmi].curws + MAXWS - 1) % MAXWS;
+                int targetws = next ? (mons[pmi].curws + 1) % numws
+                                    : (mons[pmi].curws + numws - 1) % numws;
                 if (st == MOD)
                     switch_workspace_on(pmi, targetws);
                 else if (st == (MOD | ControlMask))
@@ -3525,7 +3609,7 @@ int main(void) {
 
     if (keyboard_grabbed) XUngrabKeyboard(dpy, CurrentTime);
     for (int i = 0; i < nmons; i++) {
-        for (int ws = 0; ws < MAXWS; ws++) {
+        for (int ws = 0; ws < numws; ws++) {
             free_tree(mons[i].tree[ws]);
             mons[i].tree[ws] = NULL;
             mons[i].focused[ws] = NULL;

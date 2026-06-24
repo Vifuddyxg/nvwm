@@ -1795,29 +1795,29 @@ static int dir_code(const char *dir) {
     return DIR_DOWN;
 }
 
-/* === PURE directional picker (no globals, unit-tested in tests/dirtest.c) ===
-   Given the tiled leaf rectangles in `leaves`, return the window that lives
-   immediately in direction `d` of `from`, the way Hyprland's `movefocus`
-   does it:
+/* === directional picker (ported from inis' layout_focus_direction) ===
+   Given the tiled leaf rectangles in `leaves`, return the window in direction
+   `d` of `from`, the way inis (and Hyprland) does it -- centre-based, which is
+   what makes it feel right on dwindle/Fibonacci layouts, not just master-stack:
 
-     - only windows that are actually in that direction are considered
-       (`primary >= 0`: their near edge is at or past our facing edge; tiled
-       neighbours share an edge exactly, so primary == 0 must be accepted);
-     - among those, the nearest one wins (`primary` dominates the score);
-     - ties are broken by the smaller perpendicular-centre offset, so we pick
-       the window we are visually lined up with;
-     - a window that overlaps us on the perpendicular axis (a true
-       side-by-side neighbour) always beats a merely diagonal one, regardless
-       of distance — that is what makes "go left" feel like Hyprland and never
-       jump to a diagonally-touching tile.
+     - a candidate counts as "in that direction" when its CENTRE is past our
+       centre on that axis (dx > 0 for right, etc.); `primary` is the centre
+       distance along the axis and the nearer centre wins;
+     - ties are broken by the smaller full (Euclidean) centre distance, so we
+       pick the window we are most squarely lined up with -- inis' exact rule;
+     - GUARD: a window that overlaps us on the perpendicular axis (a true
+       side-by-side neighbour) always beats one that does not. Pure centre
+       distance alone can pick a diagonal tile whose centre happens to be
+       nearer on the axis (e.g. a wide top tile when going right); requiring
+       perpendicular overlap first keeps "go right" from ever jumping
+       up/down-and-over. Only if nothing overlaps do we fall back to the
+       plain centre-nearest window, so edge presses still move like inis.
 
-   Returns NULL when there is nothing in that direction.
-   IMPORTANT: keep this function byte-for-byte in sync with the copy in
-   tests/dirtest.c (the test compiles its own copy and asserts behaviour). */
+   Returns NULL when there is nothing in that direction. */
 static Node *pick_directional(Node **leaves, int count, Node *from, int d) {
-    Node *best = NULL;     /* nearest with perpendicular overlap */
-    Node *fallback = NULL; /* nearest of any, even diagonal */
-    long bestscore = 0, fbscore = 0;
+    Node *best = NULL;     /* nearest centre WITH perpendicular overlap */
+    Node *fallback = NULL; /* nearest centre of any in-direction window */
+    long best_primary = 0, best_dist = 0, fb_primary = 0, fb_dist = 0;
     int fx1, fy1, fx2, fy2, fcx, fcy;
 
     if (!from) return NULL;
@@ -1830,41 +1830,40 @@ static Node *pick_directional(Node **leaves, int count, Node *from, int d) {
 
     for (int i = 0; i < count; i++) {
         Node *n = leaves[i];
-        int nx1, ny1, nx2, ny2, ncx, ncy;
-        int primary, secondary, overlap;
-        long score;
+        int ncx, ncy, dx, dy, primary, overlap, valid;
+        long dist;
         if (n == from || n->floating) continue;
-        nx1 = n->x;
-        ny1 = n->y;
-        nx2 = n->x + n->w;
-        ny2 = n->y + n->h;
         ncx = n->x + n->w / 2;
         ncy = n->y + n->h / 2;
+        dx = ncx - fcx;
+        dy = ncy - fcy;
 
         if (d == DIR_LEFT) {
-            primary = fx1 - nx2;
-            overlap = interval_overlap(fy1, fy2, ny1, ny2);
-            secondary = abs(fcy - ncy);
+            valid = dx < 0; primary = -dx;
+            overlap = interval_overlap(fy1, fy2, n->y, n->y + n->h);
         } else if (d == DIR_RIGHT) {
-            primary = nx1 - fx2;
-            overlap = interval_overlap(fy1, fy2, ny1, ny2);
-            secondary = abs(fcy - ncy);
+            valid = dx > 0; primary = dx;
+            overlap = interval_overlap(fy1, fy2, n->y, n->y + n->h);
         } else if (d == DIR_UP) {
-            primary = fy1 - ny2;
-            overlap = interval_overlap(fx1, fx2, nx1, nx2);
-            secondary = abs(fcx - ncx);
+            valid = dy < 0; primary = -dy;
+            overlap = interval_overlap(fx1, fx2, n->x, n->x + n->w);
         } else {
-            primary = ny1 - fy2;
-            overlap = interval_overlap(fx1, fx2, nx1, nx2);
-            secondary = abs(fcx - ncx);
+            valid = dy > 0; primary = dy;
+            overlap = interval_overlap(fx1, fx2, n->x, n->x + n->w);
         }
 
-        if (primary < 0) continue;
-        score = (long)primary * 100000L + (long)secondary;
+        if (!valid) continue;
+        dist = (long)dx * dx + (long)dy * dy;
         if (overlap > 0) {
-            if (!best || score < bestscore) { best = n; bestscore = score; }
+            if (!best || primary < best_primary ||
+                (primary == best_primary && dist < best_dist)) {
+                best = n; best_primary = primary; best_dist = dist;
+            }
         }
-        if (!fallback || score < fbscore) { fallback = n; fbscore = score; }
+        if (!fallback || primary < fb_primary ||
+            (primary == fb_primary && dist < fb_dist)) {
+            fallback = n; fb_primary = primary; fb_dist = dist;
+        }
     }
     return best ? best : fallback;
 }

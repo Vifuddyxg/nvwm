@@ -1,3 +1,4 @@
 nvwm
 *.o
 .claude-flow/
+tests/

@@ -113,6 +113,11 @@ static Mon mons[MAXMONS];
 static int nmons = 1, curmon;
 static int randr_active = 0;
 static int randr_event_base = -1;
+/* auto-enable connected-but-disabled monitors out of the box (config: auto_monitors) */
+static int auto_monitors = 1;
+/* command run after the monitor layout changes -- e.g. to re-apply the wallpaper,
+   which X invalidates on every framebuffer resize (config: monitor_hook) */
+static char monitor_hook[256] = "";
 /* index of the monitor whose bar is currently being drawn (per-monitor curws) */
 static int barmon = 0;
 /* workspace overview (Super+Z) state */
@@ -123,6 +128,9 @@ static Window overview_win = 0;
 static Pixmap overview_pix = 0;
 /* XComposite + XRender: present and redirect active -> live thumbnails */
 static int composite_ok = 0;
+static int redirect_done = 0;   /* the one-time subwindow redirect has been resolved */
+/* compositor mode (config: compositor): 0=auto, 1=on (always redirect), 2=off (never) */
+static int compositor_mode = 0;
 /* drag-to-move inside the overview */
 static int ov_drag = 0;            /* a press is in progress */
 static Node *ov_drag_node = NULL;  /* leaf being dragged, NULL if empty-cell press */
@@ -748,6 +756,7 @@ static void swap_leaf_payload(Node *a, Node *b) {
 #define THUMB_CAP 512
 
 static void init_composite(void) {
+    if (compositor_mode == 2) return;   /* compositor = off: leave compositing to picom */
     int evb, erb;
     if (!XCompositeQueryExtension(dpy, &evb, &erb)) return;
     int maj = 0, min = 0;
@@ -755,22 +764,31 @@ static void init_composite(void) {
     /* XCompositeNameWindowPixmap needs >= 0.2 */
     if (maj == 0 && min < 2) return;
     if (!XRenderQueryExtension(dpy, &evb, &erb)) return;
-    /* If an external compositor (picom/compton) is already running it has
-       redirected the root's subwindows in Manual mode and owns presentation.
-       Requesting our own redirect on top of that fights its reference count
-       and breaks its animations / wallpaper. Detect it via the standard
-       _NET_WM_CM_S<screen> selection owner: when present, skip the redirect
-       entirely -- windows are already redirected, so XCompositeNameWindowPixmap
-       still gives us their off-screen pixmaps for the overview. */
+    /* Capability is present, but DON'T grab the redirect here. We defer it to the
+       first overview capture (ensure_redirect): by then any compositor launched
+       from our own autostart is already running and owns _NET_WM_CM_S<screen>, so
+       in auto mode we correctly detect it and skip our redirect -- which avoids
+       fighting picom's reference count and breaking its wallpaper / animations.
+       Redirecting eagerly at startup happened before autostart and always lost. */
+    composite_ok = 1;
+}
+
+/* Resolve the one-time subwindow redirect, lazily, on first overview capture.
+   An external compositor (picom/compton) already redirects in Manual mode, so we
+   only take over when nobody owns the _NET_WM_CM_S<screen> selection. Either way
+   XCompositeNameWindowPixmap then yields the off-screen pixmaps for thumbnails. */
+static void ensure_redirect(void) {
+    if (redirect_done) return;
+    redirect_done = 1;
+    if (compositor_mode == 1) {   /* compositor = on: always take over */
+        XCompositeRedirectSubwindows(dpy, root, CompositeRedirectAutomatic);
+        return;
+    }
     char cmsel[32];
     snprintf(cmsel, sizeof cmsel, "_NET_WM_CM_S%d", DefaultScreen(dpy));
     Atom cm = XInternAtom(dpy, cmsel, False);
-    if (XGetSelectionOwner(dpy, cm) == None) {
-        /* No compositor: take over redirection ourselves. Automatic keeps the
-           server painting windows normally; we just read their pixmaps. */
+    if (XGetSelectionOwner(dpy, cm) == None)
         XCompositeRedirectSubwindows(dpy, root, CompositeRedirectAutomatic);
-    }
-    composite_ok = 1;
 }
 
 static void free_thumb(Node *n) {
@@ -804,6 +822,7 @@ static void render_scaled(Picture dst, Pixmap srcpix, int sw_, int sh_,
 /* snapshot one viewable window into its node's cached thumb pixmap */
 static void capture_thumb(Node *n) {
     if (!composite_ok || !n || !n->leaf || !n->win) return;
+    ensure_redirect();   /* first capture decides whether we redirect or defer to picom */
     XWindowAttributes wa;
     if (!XGetWindowAttributes(dpy, n->win, &wa)) return;
     if (wa.map_state != IsViewable || wa.width < 1 || wa.height < 1) return;
@@ -1252,6 +1271,150 @@ static void free_splits(Node *n) {
     free_splits(n->a);
     free_splits(n->b);
     free(n);
+}
+
+/* true if the given output is physically connected */
+static int output_is_connected(XRRScreenResources *sr, RROutput out) {
+    XRROutputInfo *oi = XRRGetOutputInfo(dpy, sr, out);
+    int c = oi && oi->connection == RR_Connected;
+    if (oi) XRRFreeOutputInfo(oi);
+    return c;
+}
+
+/* tight framebuffer bounding box over every active CRTC */
+static void active_bbox(XRRScreenResources *sr, int *w, int *h) {
+    int bw = 0, bh = 0;
+    for (int i = 0; i < sr->ncrtc; i++) {
+        XRRCrtcInfo *ci = XRRGetCrtcInfo(dpy, sr, sr->crtcs[i]);
+        if (!ci) continue;
+        if (ci->mode != None && ci->noutput > 0) {
+            int r = ci->x + (int)ci->width;
+            int b = ci->y + (int)ci->height;
+            if (r > bw) bw = r;
+            if (b > bh) bh = b;
+        }
+        XRRFreeCrtcInfo(ci);
+    }
+    *w = bw; *h = bh;
+}
+
+static void set_screen_px(int w, int h) {
+    XRRSetScreenSize(dpy, root, w, h,
+        (int)(w * 25.4 / 96.0 + 0.5), (int)(h * 25.4 / 96.0 + 0.5));
+}
+
+/* Built-in `xrandr --auto`. Drives the output set to match what is physically
+ * plugged in: disconnected outputs are turned OFF (so an unplugged monitor never
+ * lingers as a phantom CRTC + dead framebuffer region that mangles the wallpaper),
+ * connected-but-dark outputs are lit at their preferred mode and laid out
+ * left-to-right, and the framebuffer is resized to the tight bounding box.
+ * Returns 1 if the layout changed. */
+static int autoconfigure_outputs(void) {
+    if (!auto_monitors || !randr_active) return 0;
+    int changed = 0;
+
+    /* Pass A: turn off CRTCs whose outputs are all disconnected (kill phantoms). */
+    XRRScreenResources *sr = XRRGetScreenResources(dpy, root);
+    if (!sr) return 0;
+    for (int i = 0; i < sr->ncrtc; i++) {
+        XRRCrtcInfo *ci = XRRGetCrtcInfo(dpy, sr, sr->crtcs[i]);
+        if (!ci) continue;
+        if (ci->mode != None && ci->noutput > 0) {
+            int any = 0;
+            for (int j = 0; j < ci->noutput; j++)
+                if (output_is_connected(sr, ci->outputs[j])) { any = 1; break; }
+            if (!any) {
+                XRRSetCrtcConfig(dpy, sr, sr->crtcs[i], CurrentTime, 0, 0,
+                                 None, RR_Rotate_0, NULL, 0);
+                changed = 1;
+            }
+        }
+        XRRFreeCrtcInfo(ci);
+    }
+    XRRFreeScreenResources(sr);
+    if (changed) XSync(dpy, False);
+
+    /* Pass B: enable connected outputs that have no CRTC, extended to the right. */
+    sr = XRRGetScreenResources(dpy, root);
+    if (!sr) return changed;
+    RRCrtc used[64];
+    int nused = 0, rightmost = 0, maxbottom = 0;
+    for (int i = 0; i < sr->ncrtc; i++) {
+        XRRCrtcInfo *ci = XRRGetCrtcInfo(dpy, sr, sr->crtcs[i]);
+        if (!ci) continue;
+        if (ci->mode != None && ci->noutput > 0) {
+            if (nused < 64) used[nused++] = sr->crtcs[i];
+            int r = ci->x + (int)ci->width;
+            int b = ci->y + (int)ci->height;
+            if (r > rightmost) rightmost = r;
+            if (b > maxbottom) maxbottom = b;
+        }
+        XRRFreeCrtcInfo(ci);
+    }
+    for (int o = 0; o < sr->noutput; o++) {
+        XRROutputInfo *oi = XRRGetOutputInfo(dpy, sr, sr->outputs[o]);
+        if (!oi) continue;
+        if (oi->connection != RR_Connected || oi->crtc != None || oi->nmode == 0) {
+            XRRFreeOutputInfo(oi);
+            continue;
+        }
+        RRMode mode = oi->modes[0];   /* preferred mode comes first */
+        int mw = 0, mh = 0;
+        for (int m = 0; m < sr->nmode; m++)
+            if (sr->modes[m].id == mode) {
+                mw = sr->modes[m].width;
+                mh = sr->modes[m].height;
+                break;
+            }
+        if (mw == 0) { XRRFreeOutputInfo(oi); continue; }
+
+        RRCrtc crtc = None;
+        for (int c = 0; c < oi->ncrtc && crtc == None; c++) {
+            RRCrtc cand = oi->crtcs[c];
+            int taken = 0;
+            for (int u = 0; u < nused; u++)
+                if (used[u] == cand) { taken = 1; break; }
+            if (!taken) crtc = cand;
+        }
+        if (crtc == None) { XRRFreeOutputInfo(oi); continue; }
+
+        /* grow the framebuffer before the new CRTC lands outside it */
+        int needw = rightmost + mw;
+        int needh = mh > maxbottom ? mh : maxbottom;
+        int curw = DisplayWidth(dpy, DefaultScreen(dpy));
+        int curh = DisplayHeight(dpy, DefaultScreen(dpy));
+        if (needw < curw) needw = curw;
+        if (needh < curh) needh = curh;
+        set_screen_px(needw, needh);
+
+        RROutput out1 = sr->outputs[o];
+        if (XRRSetCrtcConfig(dpy, sr, crtc, CurrentTime, rightmost, 0, mode,
+                             RR_Rotate_0, &out1, 1) == RRSetConfigSuccess) {
+            if (nused < 64) used[nused++] = crtc;
+            rightmost += mw;
+            if (mh > maxbottom) maxbottom = mh;
+            changed = 1;
+        }
+        XRRFreeOutputInfo(oi);
+    }
+    XRRFreeScreenResources(sr);
+
+    /* Pass C: shrink the framebuffer back to the tight bounding box of what is on. */
+    sr = XRRGetScreenResources(dpy, root);
+    if (sr) {
+        int bw = 0, bh = 0;
+        active_bbox(sr, &bw, &bh);
+        if (bw > 0 && bh > 0 &&
+            (bw != DisplayWidth(dpy, DefaultScreen(dpy)) ||
+             bh != DisplayHeight(dpy, DefaultScreen(dpy)))) {
+            set_screen_px(bw, bh);
+            changed = 1;
+        }
+        XRRFreeScreenResources(sr);
+    }
+
+    if (changed) XSync(dpy, False);
+    return changed;
 }
 
 /* fill out[] with current monitor geometry via Xinerama; returns monitor count */
@@ -2468,6 +2631,13 @@ static int apply_scalar_config(const char *k, const char *v) {
     else if (!strcmp(k, "border")) bw = atoi(v);
     else if (!strcmp(k, "bar_height")) barh = clampi(atoi(v), 0, 256);
     else if (!strcmp(k, "bar_enabled")) barenabled = parse_bool_value(v, barenabled);
+    else if (!strcmp(k, "auto_monitors")) auto_monitors = parse_bool_value(v, auto_monitors);
+    else if (!strcmp(k, "monitor_hook")) copystr(monitor_hook, sizeof monitor_hook, v);
+    else if (!strcmp(k, "compositor")) {
+        if (!strcasecmp(v, "off")) compositor_mode = 2;
+        else if (!strcasecmp(v, "on")) compositor_mode = 1;
+        else compositor_mode = 0;   /* auto */
+    }
     else if (!strcmp(k, "external_bar_height")) {
         if (!strcasecmp(v, "auto")) externalbarh = -1;
         else externalbarh = clampi(atoi(v), 0, 256);
@@ -3117,6 +3287,7 @@ int main(int argc, char **argv) {
     movecursor = XCreateFontCursor(dpy, XC_fleur);
     resizecursor = XCreateFontCursor(dpy, XC_bottom_right_corner);
     XDefineCursor(dpy, root, normalcursor);
+    loadcfg();                 /* settings first: compositor + auto_monitors gate the startup below */
     init_composite();
     initatoms();
     setup_wm_check();
@@ -3125,8 +3296,6 @@ int main(int argc, char **argv) {
     update_current_desktop();
     update_active_window();
 
-    nmons = querygeom(mons, MAXMONS);
-
     /* RandR: listen for monitor hotplug / resolution changes */
     int rrerr;
     if (XRRQueryExtension(dpy, &randr_event_base, &rrerr)) {
@@ -3134,9 +3303,11 @@ int main(int argc, char **argv) {
         XRRSelectInput(dpy, root, RRScreenChangeNotifyMask);
     }
 
+    autoconfigure_outputs();   /* light up any already-plugged monitors */
+    nmons = querygeom(mons, MAXMONS);
+
     XSelectInput(dpy, root, SubstructureNotifyMask | SubstructureRedirectMask | KeyPressMask);
 
-    loadcfg();
     update_number_of_desktops();   /* numws is now known from config */
     apply_screen_off_config();
     updatenumlockmask();
@@ -3173,11 +3344,15 @@ int main(int argc, char **argv) {
             XNextEvent(dpy, &ev);
             if (randr_active && ev.type == randr_event_base + RRScreenChangeNotify) {
                 XRRUpdateConfiguration(&ev);
+                int rrchanged = autoconfigure_outputs();   /* enable plugged / disable unplugged */
                 if (updategeom()) {
                     setupbars();
                     retile();
                     if (mon_focused(curmon)) setfocus(curmon, mon_focused(curmon), 0);
+                    rrchanged = 1;
                 }
+                /* the framebuffer resize invalidated the root wallpaper -- re-apply it */
+                if (rrchanged && monitor_hook[0]) spawn(monitor_hook);
                 continue;
             }
             switch (ev.type) {
